@@ -37,6 +37,21 @@ def search_companies(filters: dict, limit: int = 20):
     return run.json()["data"]
 
 
+def query_table(table_id: str, limit: int = 100, cursor: str = None):
+    """Reads rows from a Clay table (e.g. the manually-built Contacts table).
+
+    Clay's public API can query existing table data but cannot create tables
+    or enrichment columns - that setup happens in the Clay app UI.
+    """
+    body = {"query": {"tables": [{"id": table_id}]}, "limit": limit}
+    if cursor:
+        body["cursor"] = cursor
+
+    resp = requests.post(f"{BASE_URL}/tables/query", json=body, headers=_headers())
+    resp.raise_for_status()
+    return resp.json()
+
+
 def enrich_company(domain: str):
     """Looks up a company by domain for HQ/employee/type context.
 
