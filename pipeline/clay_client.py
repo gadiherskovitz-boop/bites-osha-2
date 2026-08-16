@@ -35,3 +35,21 @@ def search_companies(filters: dict, limit: int = 20):
     )
     run.raise_for_status()
     return run.json()["data"]
+
+
+def enrich_company(domain: str):
+    """Looks up a company by domain for HQ/employee/type context.
+
+    Returns None if Clay has no record for this domain (a real, expected
+    outcome for smaller/regional brands) rather than raising.
+    """
+    results = search_companies({"include_company_identifiers": [domain]}, limit=1)
+    if not results:
+        return None
+    record = results[0]
+    return {
+        "hq_location": record.get("location"),
+        "employee_size": record.get("size"),
+        "company_type": record.get("type"),
+        "industry": record.get("industry"),
+    }
