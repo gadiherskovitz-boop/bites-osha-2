@@ -2,38 +2,58 @@
 
 ## Goal
 
-Build a working prototype of a QSR prospecting engine for a GTM Engineer take-home assignment with Bites (mybites.io): signals in, a maintained/tiered account list, mapped contacts, signal+tier-specific GTM motions, and one real personalized first-touch — presented live in ~30 minutes as running software, not a deck. Code must be tracked on GitHub and built per `karpathy-coding-guidelines` (minimal, surgical, no premature abstraction).
+Build a working prototype of a QSR prospecting engine for a GTM Engineer take-home assignment with Bites (mybites.io): signals in, tiered accounts, mapped contacts, signal+tier-specific GTM motions, and one real personalized first-touch — presented live in ~30 minutes as running software, not a deck. Code tracked on GitHub, built per `karpathy-coding-guidelines` (minimal, surgical, no premature abstraction).
 
 ## Status
 
-A long, deliberate planning conversation (using the `grilling` skill) fully designed the system before any code was written. **The full approved plan is the primary artifact — read it first.**
+**Read `docs/signal_first_architecture.md` first — it is the current authoritative design**, superseding the account-first framing in the original plan file (see below). Architecture pivoted mid-build from account-first (curate/tier/enrich a static list, then watch for signals) to signal-first (scan OSHA data for real activity, only enrich accounts that hit) — driven by real constraints hit during the build, not a change of mind. `docs/` also has `dol_api_notes.md`, `clay_api_notes.md`, and `account_sourcing_methodology.md` — each documents a real investigation, not a plan; read before re-deriving.
 
-- **Plan file (read this first):** `/Users/ariherskovitz/.claude/plans/task-build-an-automated-parsed-rocket.md` — contains the complete architecture, account sourcing/tiering logic, both signal definitions (with the exact OSHA-relevance filter, reasoned from real research into which OSHA standards actually have a training-abatement component), the contact-resolution design, HubSpot data model, Slack/Note message templates, the GTM motion matrix, the personalization approach, and a step-by-step build sequence with a verification checklist. Every decision in it was explicitly discussed and reasoned through, not assumed — treat it as authoritative.
-- **Facts already gathered during planning** (don't re-research): Bites' actual product/ICP (researched from mybites.io — microlearning for frontline/deskless workers in hospitality/restaurant/retail/FMCG); HubSpot portal is connected (EU1, account 149021592) with standard Company/Contact properties confirmed available; Clay workspace is connected (no custom subroutines exist — use built-in Clay tools); Slack is connected (no pre-existing relevant channels found — 3 new ones need creating: `qsr-osha-complaints`, `qsr-osha-citations`, `qsr-hiring-signals`); DOL Enforcement Data API confirmed to exist and a free key was already obtained; Greenhouse/Lever public job-board APIs confirmed to work with no auth.
-- **Task tracking:** 9 tasks were created in this session's task system, IDs #1–#9, mirroring the plan's build sequence (repo scaffold → verify DOL schema → account list/tiering → contact resolution → signal scanners → signal handler → Tier 3 automation → Tier 1 motion/email → end-to-end verification). Task #1 is marked `in_progress`; #2–#9 are `pending`.
-- **Nothing has actually been built yet.** A `git init` was attempted as the first build step and was interrupted by the user in favor of writing this handoff first. The local working directory has no repo, no code, no files besides this handoff doc.
+**Done and working:**
+- Repo initialized, pushed to `https://github.com/gadiherskovitz-boop/bites-osha-2.git`. `.env` populated (DOL, HubSpot, Slack keys — gitignored, never committed). Standing permission was given to push without asking each commit for *this* session — a new session should re-confirm rather than assume that carries over.
+- HubSpot verified working end-to-end: custom Company properties, custom objects, Notes, Contacts all confirmed read/write (portal EU1, 149021592).
+- Slack verified working; 3 channels live: `qsr-osha-inspections`, `qsr-osha-violations`, `qsr-hiring-signals` (renamed from complaints/citations to match the Inspection-vs-Violation framing — Accident and Fat/Cat both count as "inspection").
+- DOL/OSHA data source resolved: use `osha.gov/ords/imis` (`industry.search` + `establishment.inspection_detail`), not the `apiprod.dol.gov` API — the latter rate-limits hard (403s on long filters, sustained 429s) under the cross-referencing this needs; the former doesn't, and was rigorously cross-validated against the official API on a real record (exact match on every field, including 9 citation line items and penalty amounts).
+- Schema resolved: an Inspection has a `type` (13 possible reasons, including Complaint/Accident/Fat-Cat); Violations are a separate, related record (joined by `activity_nr`) that can result from *any* inspection type, not just complaint-originated ones.
+- Task #3 (old account-first design) built 28 real QSR brands with real site_count/governance data sourced from QSR Magazine's QSR50 + Contenders lists, tiered, pushed to HubSpot. Under the new architecture this data is **repurposed as Rung 1 of the site_count lookup**, not "the account list" — accounts now come from the signal scanner.
+- Clay investigated extensively and **abandoned**: no email field anywhere on its public API (company or people search), no site_count field on companies, Table-based email enrichment blocked (Enterprise-plan-gated), native CRM sync blocked (Growth-plan-gated, $495/mo). Clay's MCP connection *can* get real emails interactively, but MCP tools don't exist for the standalone script at runtime, so that's not a real solution either.
+- **Decision: switch to Duo by Amplemarket** for contact/email enrichment (matches Bites' actual real stack, discovered mid-session) — researched only, not yet tested live, no API key yet. Nooks.ai (Bites' other real tool) confirmed to be a dialer/engagement platform, not an enrichment tool — not relevant to this problem.
+- `governance_model` dropped entirely per explicit decision — not needed for the demo, nothing depends on it.
+- Fat/Cat (fatality/catastrophe) inspections get no special contacts/channel — the only different treatment is they must never auto-enroll into a HubSpot Sequence, regardless of tier.
+- Persona tracks finalized: Inspection/Violation triggers → 3 contacts; Hiring trigger → 2 contacts. Details and reasoning in `pipeline/persona_tracks.py`.
 
 ## Open items
 
-- Local git repo not yet initialized. Remote already exists and is ready to receive a push: `https://github.com/gadiherskovitz-boop/bites-osha-2.git`
-- A DOL Enforcement Data API key was shared in chat during planning but has **not been stored anywhere yet**. It must go directly into a gitignored `.env` on first build step, never be committed, and never be echoed in chat again.
-- HubSpot private app token, Slack bot token, and a Clay API key are still needed (the user has these or can generate them easily, but none have been provided yet). These are required because the deliverable is a standalone pipeline that calls these APIs directly — separate from the MCP connections used during planning, which only worked for exploration inside this chat session.
-- **Unresolved technical risk** (flagged explicitly in the plan, not yet checked): the DOL Enforcement Data API's real schema for "Complaint" vs "Citation" hasn't been verified — whether they're independently-timestamped events, or two states of one inspection record. This affects whether the "complaint leads citation by 2–5 months" signal design works as designed. Must be checked against the live API before writing OSHA trigger logic.
-- `gh` CLI is not installed on this machine; git/GitHub auth hasn't been set up locally.
+- **Amplemarket/Duo**: no API key yet, nothing tested. Needs the same verification rigor Clay got — does it actually return emails via API, does its company enrichment include site_count (probably not — assume no until tested), what's the auth/endpoint shape.
+- **Task #5 (signal scanners) not built against the new design** — this is the next real coding task. Needs an Inspection scan (Complaint/Accident/Fat-Cat, fires immediately) and a separate, broader Violation scan (all inspection types) via `osha.gov/ords/imis`.
+- **Site_count waterfall**: only Rung 1 (QSR50 static lookup) exists, and even that needs refactoring out of `accounts_seed.py`'s account-list shape into a plain lookup function. Rung 4 (Wikidata SPARQL) not built. Rungs 2/3/5 are deliberately narrated-not-built (need LLM-extraction from prose; deferred, see `account_sourcing_methodology.md`).
+- **Task #4 (contact resolution) never completed** — was blocked on Clay, now pivoting to Amplemarket; `resolve_contact` orchestration itself isn't built yet.
+- **`scripts/build_accounts.py` is stale** — written for the old account-first flow; needs replacing with a signal-first driver (accounts now come from the scanner, not a fixed seed list).
+- **Task #6 (signal handler)**: `qsr_signal` custom object creation isn't built yet (only Notes exists in `pipeline/hubspot_client.py`). Needs the "fire object+note+Slack together, skip sequence enrollment only for Fat/Cat" logic.
+- Hiring scanner (Greenhouse/Lever): persona tracks defined, nothing else started.
+- Tasks #7, #8, #9 not started.
+- An early system-map Artifact (`https://claude.ai/code/artifact/c18827bf-781f-42be-9cc2-56a66c7188e7`) reflects the **old, now-superseded** account-first architecture — stale, not updated. Worth redoing once the signal-first build has real code behind it, but not yet requested.
 
 ## Key references
 
-- Approved plan: `/Users/ariherskovitz/.claude/plans/task-build-an-automated-parsed-rocket.md`
+- **Current architecture (read first):** `docs/signal_first_architecture.md`
+- Site-count waterfall design: `docs/account_sourcing_methodology.md`
+- DOL/OSHA API findings: `docs/dol_api_notes.md`
+- Clay investigation (historical — explains why Amplemarket): `docs/clay_api_notes.md`
+- Original plan (**partially superseded** — architecture/account-list/signal sections are stale, rest still mostly valid): `/Users/ariherskovitz/.claude/plans/task-build-an-automated-parsed-rocket.md`
+- Pipeline code: `pipeline/*.py` (config, hubspot_client, slack_client, clay_client, tiering, persona_tracks, accounts_seed), `scripts/*.py`
 - GitHub remote: `https://github.com/gadiherskovitz-boop/bites-osha-2.git`
 - Working directory: `/Users/ariherskovitz/Documents/Claude/Projects/Bites Assignment/Assignment 2`
-- Task list: 9 tasks (#1–#9) in this session's task tracker — check via `TaskList`/`TaskGet` for current status
+- Task tracker: 9 tasks (#1–#9), check via `TaskList`/`TaskGet` for current status (as of this handoff: #1–#3 completed, #4 in progress, #5–#9 pending)
 
 ## Suggested next steps
 
-1. Resume Task #1: `git init`, create `.gitignore` (must cover `.env`), create `.env` with real credentials (DOL key now, HubSpot/Slack/Clay tokens once obtained), initial commit, add the remote, push.
-2. Task #2: call the DOL Enforcement Data API directly and inspect its actual response schema before writing any OSHA trigger logic — resolve the open technical risk above.
-3. Continue through Tasks #3–#9 in order, exactly as sequenced in the plan file's "Build sequence" section.
+1. Get an Amplemarket (Duo) API key from the user and verify it the same way Clay was verified — real endpoints, real auth, does it actually return emails.
+2. Build the signal scanner (Task #5) against `osha.gov/ords/imis`, per `docs/signal_first_architecture.md`.
+3. Build the site_count waterfall for real: refactor Rung 1 out of `accounts_seed.py`, add Rung 4 (Wikidata).
+4. Build `resolve_contact` (Task #4) once Amplemarket access is confirmed, using the existing persona track definitions.
+5. Build the `qsr_signal` object creation + signal handler (Task #6), including the Fat/Cat sequence-exclusion rule.
+6. Continue through Tasks #7–#9.
 
 ## Suggested skills
 
-- `karpathy-coding-guidelines` — already the agreed coding standard for this build (minimal diffs, no speculative abstraction); keep applying it as implementation proceeds.
+- `karpathy-coding-guidelines` — already the agreed coding standard; keep applying (minimal diffs, no speculative abstraction) as the signal-first rebuild proceeds.
