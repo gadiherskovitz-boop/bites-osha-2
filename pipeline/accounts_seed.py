@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import date
 
 # Curated seed list of ~28 multi-unit QSR/fast-casual brands, spanning all
@@ -24,6 +26,33 @@ from datetime import date
 # establishment name a real OSHA signal surfaces.
 
 QSR50_AS_OF_DATE = date(2026, 1, 1)  # QSR 50 2026 report, 2025 US unit counts
+
+# At or above this company-owned share, OSHA's establishment names are
+# effectively complete for the brand: there are few or no franchisees
+# operating under their own legal names, so a brand-name search finds
+# essentially every location. Below it, the history is a floor - see
+# docs/brand_history_gap.md.
+COMPANY_OWNED_COMPLETE_THRESHOLD = 0.85
+
+
+def company_owned_share(brand: str) -> float | None:
+    """Share of a brand's US units it operates itself, from the QSR50 data.
+
+    Returns None for brands not in the seed list - unknown ownership, so
+    callers should assume the franchise-heavy (floor) case.
+    """
+    for seed in SEED_ACCOUNTS:
+        if seed["name"] == brand:
+            total = seed["franchised_units"] + seed["company_units"]
+            return seed["company_units"] / total if total else None
+    return None
+
+
+def history_is_complete(brand: str) -> bool:
+    """Whether OSHA name-based history can be trusted as a total rather than
+    a floor for this brand. See docs/brand_history_gap.md."""
+    share = company_owned_share(brand)
+    return share is not None and share >= COMPANY_OWNED_COMPLETE_THRESHOLD
 
 SEED_ACCOUNTS = [
     # Tier 1 candidates (200+ sites)

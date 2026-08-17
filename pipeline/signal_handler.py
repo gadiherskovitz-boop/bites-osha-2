@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from pipeline.accounts_seed import history_is_complete
 from pipeline.brand_history import year_summary
 from pipeline.hubspot_client import create_note, upsert_qsr_signal, upsert_signal_company
 from pipeline.osha_client import violation_narrative
@@ -84,16 +85,28 @@ def _history_lines(brand_candidate: str) -> list[tuple[str, str, str]]:
     """
     today = date.today()
     summary = year_summary(brand_candidate, today)
+
+    # A near-entirely company-owned brand has no franchisees operating under
+    # their own legal names, so the name-based search finds essentially every
+    # location and the figures are real totals. Chipotle (100% company-owned)
+    # is the clearest case. Anything else - including brands we have no
+    # ownership data for - is reported as a floor.
+    complete = history_is_complete(brand_candidate)
+    suffix = "" if complete else "+"
+
     lines = []
     for offset, label in [(0, f"Year to date ({today.year})"), (1, str(today.year - 1)), (2, str(today.year - 2))]:
         year = today.year - offset
         data = summary.get(year, {"count": 0, "total_penalty": 0.0})
-        lines.append(("📊", label, f"{data['count']}+ inspection(s), ${data['total_penalty']:,.0f}+ in fines"))
-    lines.append((
-        "ℹ️", "History caveat",
-        f'Counts OSHA records naming "{brand_candidate}". Locations inspected under a '
-        "franchisee's own legal name are not included, so these are floors, not totals.",
-    ))
+        lines.append(("📊", label,
+                      f"{data['count']}{suffix} inspection(s), "
+                      f"${data['total_penalty']:,.0f}{suffix} in fines"))
+    if not complete:
+        lines.append((
+            "ℹ️", "History caveat",
+            f'Counts OSHA records naming "{brand_candidate}". Locations inspected under a '
+            "franchisee's own legal name are not included, so these are floors, not totals.",
+        ))
     return lines
 
 

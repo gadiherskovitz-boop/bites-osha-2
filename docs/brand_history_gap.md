@@ -35,6 +35,36 @@ America, Llc`, and so on. That is the entire population the rollup can see.
 **Scale of the undercount is unknown but large.** Pizza Hut returning 12
 inspections across 2.5 years for 6,400 locations is not credible.
 
+## Demo-scoped fix (shipped, $0)
+
+The full rebuild was declined on cost. What shipped instead exploits a free
+signal already in the seed data: **a brand's company-owned share tells you
+whether its OSHA history is complete.** A brand with no franchisees has
+nobody to hide behind — every location is inspected under the brand's own
+name, so the name-based search finds all of them.
+
+`accounts_seed.py:history_is_complete()` reports `True` at ≥85% company-owned,
+and `_history_lines()` drops both the `+` markers and the caveat for those
+brands. So accurate numbers are stated plainly and only uncertain ones are
+hedged:
+
+| Brand | Company-owned | History reported as |
+|---|---|---|
+| Chipotle Mexican Grill | **100%** | `3 inspection(s), $2,250 in fines` — a real total |
+| Starbucks | 60% | floor + caveat |
+| Panera Bread | 50% | floor + caveat |
+| McDonald's | 5% | floor + caveat |
+| Pizza Hut | unknown (not in seed list) | floor + caveat |
+
+**Chipotle is therefore the account to feature in the demo**: 100%
+company-owned, a live signal in the current window, Tier 1, and 15
+inspections with real penalties over 2024–2026 that are genuinely complete
+rather than a floor. Starbucks (60%) and Panera (50%) are the next best, with
+the caveat honestly shown.
+
+Selecting demo accounts this way costs nothing and turns the limitation into
+a point in the system's favour: it knows which of its own numbers to trust.
+
 ## Interim fix (shipped)
 
 `pipeline/signal_handler.py:_history_lines()` now renders these as floors —
