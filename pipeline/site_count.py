@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 import unicodedata
@@ -60,6 +61,7 @@ def _rung1_lookup(establishment_name: str) -> dict | None:
                 # domain) - Rung 4/unresolved accounts have neither, since
                 # OSHA establishment names are franchisee legal names, not
                 # brand records. See pipeline/hubspot_client.py:upsert_signal_company.
+                "tier_hint": None,
                 "brand_name": seed["name"],
                 "domain": seed["domain"],
             }
@@ -151,29 +153,53 @@ def _rung4_wikidata_lookup(establishment_name: str) -> dict | None:
         "source": f"Wikidata {qid} (P8368)",
         "confidence": "wikidata",
         "as_of_date": as_of,
+        "tier_hint": None,
         "brand_name": None,
         "domain": None,
     }
 
 
-def lookup_site_count(establishment_name: str) -> dict:
-    """The site_count waterfall: Rung 1 (QSR50/Contenders) -> Rung 4
-    (Wikidata) -> unresolved. Always returns a dict - never a bare number -
-    per docs/account_sourcing_methodology.md, so a Tier-3-by-default account
-    (value=None) is distinguishable from a verified one.
+def _rung5_llm_lookup(establishment_name: str) -> dict | None:
+    """Web-grounded tier classification via Claude + the web_search tool.
 
-    Rungs 2 (FDD), 3 (SEC EDGAR), 5 (company website) are deliberately not
-    built here - each needs an LLM to extract a number from prose, not just
-    an API call. See docs/account_sourcing_methodology.md.
+    Skipped entirely when ANTHROPIC_API_KEY isn't set - this rung is the
+    only part of the pipeline that costs money per call, so it fails open
+    rather than making a missing key a hard error. Import is deferred so
+    the anthropic SDK stays an optional dependency.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    from pipeline.tier_classifier import classify_tier
+
+    return classify_tier(establishment_name)
+
+
+def lookup_site_count(establishment_name: str) -> dict:
+    """The site_count waterfall: Rung 1 (QSR50/Contenders, free/instant) ->
+    Rung 4 (Wikidata, free/fast) -> Rung 5 (LLM + web search, paid/slow) ->
+    unresolved. Always returns a dict - never a bare number - per
+    docs/account_sourcing_methodology.md, so a Tier-3-by-default account
+    (value=None, tier_hint=None) is distinguishable from a verified one.
+
+    Ordered cheapest-first, so the paid rung only runs for brands the two
+    free rungs miss. Rung 5 also subsumes the separately-narrated Rungs 2
+    (FDD) and 3 (SEC EDGAR) - with a web-search tool the model picks
+    whichever source exists and reports which one it used. See
+    pipeline/tier_classifier.py.
+
+    Rung 5 is skipped when no ANTHROPIC_API_KEY is configured, so the
+    pipeline still runs (degrading to the Tier 3 default) without one.
     """
     return (
         _rung1_lookup(establishment_name)
         or _rung4_wikidata_lookup(establishment_name)
+        or _rung5_llm_lookup(establishment_name)
         or {
             "value": None,
             "source": None,
             "confidence": "estimated",
             "as_of_date": None,
+            "tier_hint": None,
             "brand_name": None,
             "domain": None,
         }
