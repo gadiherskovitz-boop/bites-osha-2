@@ -5,7 +5,7 @@ import os
 from datetime import date
 
 from pipeline.osha_client import establishment_search, inspection_detail
-from pipeline.signal_scanner import RESTAURANT_NAICS
+from pipeline.signal_scanner import RESTAURANT_NAICS, TRAINING_LINKED_SECTIONS, _federal_section
 
 HISTORY_YEARS_BACK = 2  # covers "2025" and "2024" alongside the current year's YTD
 
@@ -53,6 +53,16 @@ def year_summary(brand_name: str, today: date | None = None) -> dict[int, dict]:
     issuance_date - a citation issued after year-end for a late-December
     inspection counts against the inspection's year. A documented
     simplification, not an oversight.
+
+    Each year's dict distinguishes inspections from citations - "292 prior
+    inspections, 520 prior citations" are two different numbers, and only
+    the first was tracked here originally - and further splits citations
+    into training-related vs. other, reusing signal_scanner's
+    TRAINING_LINKED_SECTIONS (the same standards that decide whether a NEW
+    citation fires a signal). This is the sharper number for Bites'
+    actual pitch: how many of a brand's citations are the kind training
+    would have prevented, not just a raw citation count. Free - the
+    per-violation detail is already fetched for total_penalty.
     """
     today = today or date.today()
     cache_path = _cache_path(brand_name, today)
@@ -63,7 +73,12 @@ def year_summary(brand_name: str, today: date | None = None) -> dict[int, dict]:
     start = date(today.year - HISTORY_YEARS_BACK, 1, 1)
 
     summary = {
-        year: {"count": 0, "total_penalty": 0.0}
+        year: {
+            "count": 0,
+            "violation_count": 0,
+            "training_violation_count": 0,
+            "total_penalty": 0.0,
+        }
         for year in range(today.year - HISTORY_YEARS_BACK, today.year + 1)
     }
 
@@ -79,9 +94,15 @@ def year_summary(brand_name: str, today: date | None = None) -> dict[int, dict]:
         summary[year]["count"] += 1
         if row["violations_count"] > 0:
             detail = inspection_detail(row["activity_nr"])
-            summary[year]["total_penalty"] += sum(
-                v["current_penalty"] for v in detail["violations"]
-            )
+            for v in detail["violations"]:
+                summary[year]["violation_count"] += 1
+                summary[year]["total_penalty"] += v["current_penalty"]
+                # Narrower than is_relevant_violation() on purpose: only the
+                # standard-based match, not Willful/Repeat/FTA - "training-
+                # related" should mean the cited standard is itself a
+                # training-abatement one, not any serious classification.
+                if _federal_section(v["standard_cited"]) in TRAINING_LINKED_SECTIONS:
+                    summary[year]["training_violation_count"] += 1
 
     _write_cache(cache_path, summary)
     return summary

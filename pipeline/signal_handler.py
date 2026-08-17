@@ -97,10 +97,16 @@ def _history_lines(brand_candidate: str) -> list[tuple[str, str, str]]:
     lines = []
     for offset, label in [(0, f"Year to date ({today.year})"), (1, str(today.year - 1)), (2, str(today.year - 2))]:
         year = today.year - offset
-        data = summary.get(year, {"count": 0, "total_penalty": 0.0})
+        data = summary.get(year, {"count": 0, "violation_count": 0,
+                                   "training_violation_count": 0, "total_penalty": 0.0})
+        training_note = (
+            f", {data['training_violation_count']}{suffix} training-related"
+            if data["violation_count"] > 0 else ""
+        )
         lines.append(("📊", label,
                       f"{data['count']}{suffix} inspection(s), "
-                      f"${data['total_penalty']:,.0f}{suffix} in fines"))
+                      f"{data['violation_count']}{suffix} citation(s)"
+                      f"{training_note}, ${data['total_penalty']:,.0f}{suffix} in fines"))
     if not complete:
         lines.append((
             "ℹ️", "History caveat",
