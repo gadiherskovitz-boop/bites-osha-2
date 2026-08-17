@@ -6,9 +6,12 @@ BASE_URL = "https://slack.com/api"
 
 # Created once via conversations.create; IDs are stable, so hardcoded here
 # rather than re-created/looked-up on every run.
+# Inspection = any early-stage trigger (Complaint, Accident, Fat/Cat - no
+# outcome known yet). Violation = a citation was actually issued, regardless
+# of what inspection type led to it.
 CHANNELS = {
-    "osha_complaints": "C0BQLSGQMGR",
-    "osha_citations": "C0BQJTGQ1CJ",
+    "osha_inspections": "C0BQLSGQMGR",
+    "osha_violations": "C0BQJTGQ1CJ",
     "hiring_signals": "C0BQJTH9F26",
 }
 
