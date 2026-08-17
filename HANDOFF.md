@@ -23,8 +23,8 @@ Build a working prototype of a QSR prospecting engine for a GTM Engineer take-ho
 
 ## Open items
 
-- **Amplemarket/Duo**: no API key yet, nothing tested. Needs the same verification rigor Clay got — does it actually return emails via API, does its company enrichment include site_count (probably not — assume no until tested), what's the auth/endpoint shape.
-- **Task #5 (signal scanners) not built against the new design** — this is the next real coding task. Needs an Inspection scan (Complaint/Accident/Fat-Cat, fires immediately) and a separate, broader Violation scan (all inspection types) via `osha.gov/ords/imis`.
+- **Amplemarket/Duo**: no API key yet, nothing tested. Blocked on the user obtaining a business-domain trial account (Amplemarket rejects a plain Gmail signup) — in progress in a separate session using the `wizard` skill. Needs the same verification rigor Clay got — does it actually return emails via API, does its company enrichment include site_count (probably not — assume no until tested), what's the auth/endpoint shape.
+- **Task #5 (signal scanners) — done.** `pipeline/osha_client.py` (HTTP + HTML parsing) and `pipeline/signal_scanner.py` (`scan_inspections`, `scan_violations`, `is_relevant_violation`) built and verified live against `osha.gov/ords/imis` — see `docs/osha_ords_imis_notes.md` for the real mechanics found (a swapped start/end date-field quirk on the site's own form, NAICS is one-per-request only, state-plan citations use non-federal standard numbering). Live run over the trailing 100-day window across all 3 restaurant NAICS: 268 Inspection triggers (248 Complaint/14 Accident/6 Fat-Cat), 0 Violation triggers this window (checked — 16 real citation line items existed, none matched the relevance filter; filter logic itself verified correct against synthetic known-relevant/known-irrelevant cases). Runnable via `scripts/scan_signals.py`.
 - **Site_count waterfall**: only Rung 1 (QSR50 static lookup) exists, and even that needs refactoring out of `accounts_seed.py`'s account-list shape into a plain lookup function. Rung 4 (Wikidata SPARQL) not built. Rungs 2/3/5 are deliberately narrated-not-built (need LLM-extraction from prose; deferred, see `account_sourcing_methodology.md`).
 - **Task #4 (contact resolution) never completed** — was blocked on Clay, now pivoting to Amplemarket; `resolve_contact` orchestration itself isn't built yet.
 - **`scripts/build_accounts.py` is stale** — written for the old account-first flow; needs replacing with a signal-first driver (accounts now come from the scanner, not a fixed seed list).
@@ -38,6 +38,7 @@ Build a working prototype of a QSR prospecting engine for a GTM Engineer take-ho
 - **Current architecture (read first):** `docs/signal_first_architecture.md`
 - Site-count waterfall design: `docs/account_sourcing_methodology.md`
 - DOL/OSHA API findings: `docs/dol_api_notes.md`
+- osha.gov/ords/imis mechanics (the live scanner data source): `docs/osha_ords_imis_notes.md`
 - Clay investigation (historical — explains why Amplemarket): `docs/clay_api_notes.md`
 - Original plan (**partially superseded** — architecture/account-list/signal sections are stale, rest still mostly valid): `/Users/ariherskovitz/.claude/plans/task-build-an-automated-parsed-rocket.md`
 - Pipeline code: `pipeline/*.py` (config, hubspot_client, slack_client, clay_client, tiering, persona_tracks, accounts_seed), `scripts/*.py`
@@ -48,11 +49,10 @@ Build a working prototype of a QSR prospecting engine for a GTM Engineer take-ho
 ## Suggested next steps
 
 1. Get an Amplemarket (Duo) API key from the user and verify it the same way Clay was verified — real endpoints, real auth, does it actually return emails.
-2. Build the signal scanner (Task #5) against `osha.gov/ords/imis`, per `docs/signal_first_architecture.md`.
-3. Build the site_count waterfall for real: refactor Rung 1 out of `accounts_seed.py`, add Rung 4 (Wikidata).
-4. Build `resolve_contact` (Task #4) once Amplemarket access is confirmed, using the existing persona track definitions.
-5. Build the `qsr_signal` object creation + signal handler (Task #6), including the Fat/Cat sequence-exclusion rule.
-6. Continue through Tasks #7–#9.
+2. Build the site_count waterfall for real: refactor Rung 1 out of `accounts_seed.py`, add Rung 4 (Wikidata).
+3. Build `resolve_contact` (Task #4) once Amplemarket access is confirmed, using the existing persona track definitions.
+4. Build the `qsr_signal` object creation + signal handler (Task #6), including the Fat/Cat sequence-exclusion rule, feeding off `scan_inspections()`/`scan_violations()`.
+5. Continue through Tasks #7–#9.
 
 ## Suggested skills
 
