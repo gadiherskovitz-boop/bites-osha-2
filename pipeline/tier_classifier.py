@@ -92,10 +92,15 @@ Count US locations of the specific brand asked about. Do not count \
 international locations, and do not count sibling brands owned by the same \
 parent company.
 
-Return found=false only when you genuinely cannot identify the brand at all \
-- for example a franchisee or holding company name where you cannot tell \
-which consumer-facing brand it operates, or a single independent restaurant \
-that is not part of a chain."""
+Many of these names are legal entities rather than consumer-facing brands - \
+a franchisee, an operating company, or a chain's corporate registration \
+(for example "Blazin Wings, Inc." is the corporate entity of Buffalo Wild \
+Wings). Search for the name to find which brand it operates and classify \
+THAT brand. Do this before concluding you cannot identify it.
+
+Return found=false only when the name really does not resolve to a chain - \
+a single independent restaurant, or an operating company whose brand you \
+cannot determine even after searching."""
 
 # No source/provenance fields: the operator explicitly does not need source
 # attribution for this build, so they are not requested. site_count is kept

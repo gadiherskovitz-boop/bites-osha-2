@@ -81,6 +81,47 @@ All four counts are accurate against public figures, and all four are brands
 Rung 1's 28-name list misses **and** Wikidata has no `P8368` claim for — the
 exact gap this rung was built to close.
 
+## Measured coverage against the real backlog
+
+Sampled 14 of the 243 establishment names (of 258) that Rung 1 misses:
+
+| Outcome | Count | Examples |
+|---|---|---|
+| Resolved | 4/14 (~29%) | `Ayvaz Pizza Llc Dba Pizza Hut` → **Tier 1** (6,408); `Dutch Bros Coffee` → Tier 1 (1,266); `Tim Hortons 7479` → Tier 1 (691); `Friends Winder Grill, Llc` → Tier 3 (9) |
+| Declined → Tier 3 default | 10/14 | `Blazin Wings, Inc.`, `Ssb Eastern, Llc`, `Restaurant Management Group, Llc`, … |
+
+Extrapolated: ~70 of 243 brands resolvable, roughly 50 of them Tier 1
+accounts currently sitting at Tier 3.
+
+**Two results worth noting.** `Ayvaz Pizza Llc Dba Pizza Hut` resolving to
+Tier 1 is `company_names.py` and Rung 5 working together — the DBA rule
+collapses the franchisee to "Pizza Hut", then Rung 5 tiers the brand.
+`Tim Hortons 7479` came back 691, correctly **excluding** its ~3,500
+Canadian locations: the US-only instruction in the prompt is doing real work.
+
+## Known limitation: opaque legal-entity names
+
+The 10 declines are almost all franchisee or operating-company names with no
+brand signal (`Ssb Eastern, Llc`, `Central Coast Star, Llc`). Rung 5
+**declines rather than guessing**, which is the correct failure mode — they
+land on the Tier 3 default — but it means this rung does *not* solve the
+franchisee-identity problem.
+
+A prompt fix was added after the first sample (telling the model to search
+for the brand behind a legal entity, with `Blazin Wings, Inc.` given as a
+worked example) and recovered 1 of the 10: `Nevada Restaurant Services, Inc.`
+→ Tier 1.
+
+**Unresolved anomaly, worth knowing before extending this:** asked in
+free-form, Haiku correctly identifies `Blazin Wings, Inc.` as Buffalo Wild
+Wings with ~1,451 US locations. Under the constrained structured-output call
+it still returns `found=false` — *even with that exact company named as an
+example in the system prompt.* The model has the knowledge and won't emit it
+through the schema. If this gap matters, the fix is probably a two-step call
+(resolve entity → brand in a free-form call, then classify the brand), at
+roughly double the cost and latency. Not built — the Tier 3 default is a
+safe landing place, and these are the lowest-stakes accounts to under-tier.
+
 ## Integration
 
 - `lookup_site_count()`: Rung 1 (free/instant) → Rung 4 (free/fast) →
