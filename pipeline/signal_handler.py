@@ -66,13 +66,34 @@ def _event_text(signal: dict) -> str:
 
 
 def _history_lines(brand_candidate: str) -> list[tuple[str, str, str]]:
+    """Brand-wide inspection/fine history by year.
+
+    These are FLOORS, not totals, and are labelled as such. OSHA has no
+    brand field, so year_summary() can only find locations whose
+    establishment name contains the brand string. Locations inspected under
+    a franchisee's own legal name are invisible to it - 'Carrols Llc'
+    (~1,000 Burger Kings) and 'Sizzling Platter, Llc' (hundreds of Little
+    Caesars) both appear in OSHA with no brand in the name, verified live.
+    Pizza Hut, a ~6,400-location chain, returns only 12 inspections across
+    2.5 years this way.
+
+    A rep quoting these to a prospect must not state them as totals, hence
+    the "+" and the caveat line. Closing the gap for real needs
+    establishment-name -> brand resolution across a full historical scan;
+    see docs/brand_history_gap.md.
+    """
     today = date.today()
     summary = year_summary(brand_candidate, today)
     lines = []
     for offset, label in [(0, f"Year to date ({today.year})"), (1, str(today.year - 1)), (2, str(today.year - 2))]:
         year = today.year - offset
         data = summary.get(year, {"count": 0, "total_penalty": 0.0})
-        lines.append(("📊", label, f"{data['count']} inspection(s), ${data['total_penalty']:,.0f} in fines"))
+        lines.append(("📊", label, f"{data['count']}+ inspection(s), ${data['total_penalty']:,.0f}+ in fines"))
+    lines.append((
+        "ℹ️", "History caveat",
+        f'Counts OSHA records naming "{brand_candidate}". Locations inspected under a '
+        "franchisee's own legal name are not included, so these are floors, not totals.",
+    ))
     return lines
 
 
