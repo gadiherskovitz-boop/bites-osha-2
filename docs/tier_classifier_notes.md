@@ -1,97 +1,101 @@
-# Rung 5 — web-grounded tier classification (LLM)
+# Rung 5 — LLM tier classification (Haiku + web search)
 
-⚠️ **Built but NOT yet verified live** — no `ANTHROPIC_API_KEY` was available
-when this was written. Every other integration in this project was confirmed
-against real endpoints before being called working; this one has not been.
-Run `scripts/verify_tier_classifier.py` with a real key before relying on it.
+**Verified live on 2026-08-17** via `scripts/verify_tier_classifier.py`.
 
 ## The reframing that makes this rung cheap
 
 Tiering needs a **band**, not an exact count. "Is this chain 200+ locations?"
-is far easier and far more reliably answerable than "exactly how many
-locations does it have?" — so `pipeline/tier_classifier.py` asks for the band
-directly and treats an exact count as an optional bonus when a source states
-one.
+is far easier and more reliably answerable than "exactly how many locations
+does it have?" — so this asks for the band directly, with the exact count as
+a bonus when the model knows it.
 
-That also inverts the usual latency objection to putting an LLM in a
-pipeline. This rung is **not** per-signal: it runs once per *brand*, only for
-brands the two free rungs miss, and the result is cached permanently
-(`output/tier_cache/`, gitignored). Site counts move on the order of years.
+That also removes the latency objection to putting an LLM in the pipeline.
+This runs once per *brand* (not per signal), only for brands the two free
+rungs miss, and caches permanently in `output/tier_cache/` (gitignored).
+Measured: **2.8–4.4s cold, 0.003s cached.**
 
-## Why one rung, not three
+## Three operator decisions baked in
 
-`docs/account_sourcing_methodology.md` narrates Rungs 2 (FDD aggregators),
-3 (SEC EDGAR) and 5 (company website) as three separate unbuilt rungs. They
-are collapsed into this single rung deliberately: with a web-search tool the
-model picks whichever of those sources actually exists for a given brand, so
-three source-specific integrations would be three brittle code paths doing
-one job. The model reports `source_kind` and `source_url`, so source
-attribution — what the separate rungs were really for — survives the merge.
+**1. No source attribution.** Deliberately not requested — the operator
+doesn't need provenance for this build, so `source_url`/`source_kind`/
+`as_of_year`/`reasoning` were dropped from the schema. The model is still
+told to search rather than answer from memory (it's what keeps the counts
+accurate), but nothing tracks which page it used. Reinstating provenance
+means adding those fields back to `_SCHEMA`.
 
-## Why web-grounded, not free recall
+**2. Round up at band boundaries, don't discard.** An earlier draft threw
+away low-confidence answers. The operator's explicit rule replaced that:
+if a chain sits near ~50 locations (Tier 3/Tier 2) or ~200 (Tier 2/Tier 1)
+and the model can't tell which side, it returns its best band plus
+`confidence: "low"`, and `round_up_band()` bumps it one band up. Rationale:
+under-tiering a real prospect costs a missed opportunity, over-tiering costs
+a little wasted attention, and the bands are wide enough that edge cases are
+genuinely low-stakes.
 
-`docs/account_sourcing_methodology.md` explicitly cut "generic web search +
-LLM guessing" from the waterfall: extraction from a retrieved document is a
-materially lower hallucination risk than free-recall guessing. That still
-holds, and this rung respects it — the model must ground its answer in a page
-it actually fetched and return the URL.
+*Implementation note:* when a rounded band is returned, `value` is set to
+`None`. Keeping the exact count would let `tier_for_lookup()` recompute the
+un-rounded tier from it and silently defeat the rounding rule.
 
-**Confidence is asymmetric by band, and the prompt says so.** Whether a
-national chain clears 200 locations is near-certain; distinguishing 45 from
-55 (Tier 3 vs Tier 2) is genuinely hard. The model is told to return `low`
-rather than guess in that middle range, and **a `low` result is discarded** —
-it falls through to the Tier 3 default like any other unresolved account.
-This is the trust hierarchy the methodology doc asks for: `verified` (QSR50)
-> `wikidata` > `web_high`/`web_medium` > `estimated` (default).
+**3. Haiku 4.5, not Opus 5** — ~3× cheaper on a coarse classification task.
+**This switch required three model-specific changes, any one of which would
+have failed on first run:**
 
-## Cost — the actual numbers
+| Change | Why |
+|---|---|
+| `web_search_20250305`, not `_20260209` | The dynamic-filtering variant requires Opus 4.6+/Sonnet 4.6+. Not available on Haiku 4.5. |
+| No `output_config.effort` | `effort` **errors** on Haiku 4.5 — it isn't a supported parameter on that model. |
+| No `thinking` | Haiku 4.5 has no adaptive thinking; omitting it means none, which suits this task. |
 
-Per brand: ~1 web search ($10 per 1,000 = $0.01) + ~6K input + ~800 output.
+Moving back to Opus 5 means reversing all three, not just the `MODEL`
+constant. Both are noted in the code.
 
-| Model | Input | Output | ≈ per brand | 245 unresolved brands |
+## Cost
+
+Per brand: ~1 web search ($10/1,000 = $0.01) + ~6K input + ~500 output.
+
+| Model | Input | Output | ≈ per brand | 246-brand backlog |
 |---|---|---|---|---|
-| `claude-opus-5` (default) | $5/MTok | $25/MTok | ~$0.06 | **~$15 one-time** |
-| `claude-haiku-4-5` | $1/MTok | $5/MTok | ~$0.02 | ~$5 one-time |
+| **`claude-haiku-4-5`** (in use) | $1/MTok | $5/MTok | **~$0.02** | **~$5 one-time** |
+| `claude-opus-5` | $5/MTok | $25/MTok | ~$0.06 | ~$15 one-time |
 
-One-time because of the permanent per-brand cache. `MODEL` in
-`pipeline/tier_classifier.py` is a single constant — Opus 5 is the default
-per Anthropic's guidance; downgrading for cost is a deliberate operator
-choice, not a silent default. For a coarse band classification grounded in
-retrieved text, Haiku is a defensible call.
+One-time because of the permanent per-brand cache. The web search now
+dominates the per-call cost on Haiku — dropping search would roughly halve
+it again, at the cost of the grounding that keeps the counts accurate.
+
+## Verified results
+
+`scripts/verify_tier_classifier.py`, all passing:
+
+| Check | Result |
+|---|---|
+| Burger King → Tier 1 | ✅ 7,739 US locations, `web_high` |
+| Pizza Hut → Tier 1 | ✅ 6,408, `web_high` |
+| KFC → Tier 1 | ✅ 4,267, `web_high` |
+| Dairy Queen → Tier 1 | ✅ 4,175, `web_high` |
+| Subway short-circuits at Rung 4 | ✅ resolved by `wikidata`, Rung 5 never called (no wasted spend) |
+| `Master Pho 1 Llc` (real single-location independent from our own scan) | ✅ declined — did not hallucinate a chain |
+| Round-up rule, all four bands | ✅ pure logic, tested without API |
+| Cache hit | ✅ 0.003s |
+
+All four counts are accurate against public figures, and all four are brands
+Rung 1's 28-name list misses **and** Wikidata has no `P8368` claim for — the
+exact gap this rung was built to close.
 
 ## Integration
 
-- `lookup_site_count()` runs Rung 1 → Rung 4 → **Rung 5** → unresolved,
-  cheapest-first, so the paid rung only fires on brands the free rungs miss.
-- Results carry a new `tier_hint` key: a band with no exact number behind it.
+- `lookup_site_count()`: Rung 1 (free/instant) → Rung 4 (free/fast) →
+  **Rung 5 (paid/slow)** → unresolved. Cheapest-first, so the paid rung only
+  fires on brands the free rungs miss — verified by the Subway case.
+- Results carry `tier_hint`: a band with no exact number behind it.
   `tier_for_lookup()` resolves exact count → `tier_hint` → Tier 3 default.
-  A `tier_hint` of `Disqualified` correctly returns `None`, not Tier 3.
-- **Rung 5 is skipped entirely when `ANTHROPIC_API_KEY` is unset** — verified:
+  A `tier_hint` of `Disqualified` returns `None`, not Tier 3.
+- **Rung 5 is skipped entirely when `ANTHROPIC_API_KEY` is unset** — verified;
   the pipeline still runs and degrades to the Tier 3 default. The `anthropic`
-  SDK import is deferred so it stays an optional dependency.
+  import is deferred so the SDK stays an optional dependency.
 
-## What verification must show
+## Resolved risk
 
-`scripts/verify_tier_classifier.py` checks four things against
-independently-known answers:
-
-1. **Burger King / Pizza Hut / KFC → Tier 1.** These are precisely the brands
-   Rung 1's 28-brand list misses and Wikidata has no `P8368` claim for
-   (verified live) — the real target of this rung.
-2. **Subway short-circuits at Rung 4** (36,821 via Wikidata) and never reaches
-   the paid rung.
-3. **`Master Pho 1 Llc`** — a real single-location independent from our own
-   OSHA scan — must NOT resolve to a tier. Confidently tiering it means the
-   model is hallucinating.
-4. **Cache hit on re-run** — instant, no API calls.
-
-## Untested risks
-
-- **Structured outputs + web search together.** `output_config.format` is
-  documented as incompatible with *citations*; web search results carry
-  citations of their own. If this 400s, the fallback is to drop
-  `output_config.format` and parse JSON out of the response text. This is the
-  single most likely thing to break on first run — and it fails loudly, not
-  silently.
-- **`effort: "low"`** is set for a coarse task. If the middle bands prove
-  unreliable in testing, raise it before adding prompt scaffolding.
+The one flagged unknown — whether structured outputs (`output_config.format`)
+would 400 alongside the web-search tool, since structured outputs are
+documented as incompatible with *citations* and search results carry their
+own — **did not materialize.** Confirmed working together on Haiku 4.5.

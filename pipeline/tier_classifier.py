@@ -1,10 +1,10 @@
-"""Rung 5 of the site_count waterfall: web-grounded tier classification.
+"""Rung 5 of the site_count waterfall: LLM tier classification.
 
-⚠️ UNVERIFIED — written against the current Claude API docs but never run
-live (no ANTHROPIC_API_KEY available at authoring time). Everything else in
-this pipeline was verified against real endpoints before being documented as
-working; this module has not been. Do not describe it as working until
-`scripts/verify_tier_classifier.py` has been run against a real key.
+Verified live 2026-08-17 via scripts/verify_tier_classifier.py - Burger King,
+Pizza Hut, KFC and Dairy Queen all correctly Tier 1 with accurate counts,
+Subway correctly short-circuits at Rung 4, and a real single-location
+independent from our own OSHA scan is correctly declined rather than
+hallucinated into a chain. See docs/tier_classifier_notes.md.
 
 WHY THIS RUNG EXISTS, AND WHY IT'S ONE RUNG RATHER THAN THREE
 
@@ -46,24 +46,23 @@ from datetime import date
 
 from pipeline.company_names import brand_name
 
-# Per the Anthropic API skill's default. This is a coarse classification
-# task, so a cheaper model is a legitimate choice - see the cost table in
-# docs/tier_classifier_notes.md - but downgrading for cost is the operator's
-# call, not a silent default. Switch this one constant to change it.
-MODEL = "claude-opus-5"
-
-# Dynamic-filtering web search: the model filters results in a sandbox
-# before they hit the context window. Do NOT also declare code_execution -
-# it is built into this tool version, and a second execution environment
-# confuses the model.
-WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search"}
-
-# Coarse classification - not intelligence-sensitive, and the search results
-# do the real work. Raise if the middle bands prove unreliable in testing.
-EFFORT = "low"
+# Haiku 4.5, chosen deliberately for cost on a coarse classification task
+# (~3x cheaper than Opus 5 here). Three things change with this choice and
+# all three would 400 or misbehave if switched carelessly:
+#   1. Web search must be the BASIC tool variant - the dynamic-filtering
+#      `web_search_20260209` requires Opus 4.6+/Sonnet 4.6+ and is not
+#      available on Haiku 4.5.
+#   2. `output_config.effort` ERRORS on Haiku 4.5 - it is not a supported
+#      parameter on this model, so it is omitted entirely.
+#   3. Haiku 4.5 has no adaptive thinking; omitting `thinking` means no
+#      thinking, which is correct for this task.
+# Moving back to Opus 5 means reversing all three, not just this constant.
+MODEL = "claude-haiku-4-5"
+WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search"}
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "output", "tier_cache")
 
+# Ascending, so an uncertain answer can be rounded up one band by index.
 TIER_BANDS = ["Disqualified", "Tier 3", "Tier 2", "Tier 1"]
 
 _SYSTEM = """You classify US restaurant chains into size bands for a sales \
@@ -75,31 +74,38 @@ Bands, by number of currently-operating US locations:
 - "Tier 2": 50 to 199
 - "Tier 1": 200 or more
 
-Search the web and ground your answer in a page you actually retrieved. \
-Report the URL you used. Do not answer from memory alone - if searching \
-finds nothing usable, say so.
+Search the web to check your answer rather than relying on memory alone.
 
-Confidence is not uniform across bands. Whether a large national chain \
-clears 200 locations is near-certain and should be "high". Distinguishing \
-45 from 55 locations (Tier 3 vs Tier 2) is genuinely hard and should be \
-"low" unless a source states a specific number. Return "low" rather than \
-guessing - a low-confidence answer is discarded downstream, which is the \
-correct outcome when the evidence is weak.
+Report confidence in the BAND, not in the exact number:
+- "high": you are confident which band this chain falls in. Whether a large \
+national chain clears 200 locations is usually this case.
+- "low": the chain sits near a band boundary and you cannot tell which side \
+of it they fall on - roughly 50 locations (Tier 3 vs Tier 2) or roughly 200 \
+(Tier 2 vs Tier 1).
+
+A "low" answer is NOT discarded. It is rounded UP to the next band, which is \
+the deliberate policy here: under-tiering a real prospect costs a missed \
+opportunity, while over-tiering one costs a little wasted attention. So \
+return your best band plus "low" rather than refusing to answer.
 
 Count US locations of the specific brand asked about. Do not count \
 international locations, and do not count sibling brands owned by the same \
 parent company.
 
-If the name is a franchisee or holding company rather than a consumer-facing \
-brand, and you cannot determine which brand it operates, return \
-found=false."""
+Return found=false only when you genuinely cannot identify the brand at all \
+- for example a franchisee or holding company name where you cannot tell \
+which consumer-facing brand it operates, or a single independent restaurant \
+that is not part of a chain."""
 
+# No source/provenance fields: the operator explicitly does not need source
+# attribution for this build, so they are not requested. site_count is kept
+# because it populates a real HubSpot Company property.
 _SCHEMA = {
     "type": "object",
     "properties": {
         "found": {
             "type": "boolean",
-            "description": "Whether a usable, sourced answer was found.",
+            "description": "False only when the brand cannot be identified at all.",
         },
         "tier": {
             "type": "string",
@@ -108,34 +114,30 @@ _SCHEMA = {
         },
         "site_count": {
             "type": ["integer", "null"],
-            "description": "Exact US location count if a source states one, else null.",
-        },
-        "source_url": {
-            "type": ["string", "null"],
-            "description": "URL of the page the answer is grounded in.",
-        },
-        "source_kind": {
-            "type": ["string", "null"],
-            "description": "What kind of source: FDD, SEC filing, company website, news, industry report, other.",
-        },
-        "as_of_year": {
-            "type": ["integer", "null"],
-            "description": "Year the source's figure refers to, if stated.",
+            "description": "Exact US location count if known, else null.",
         },
         "confidence": {
             "type": "string",
-            "enum": ["high", "medium", "low"],
-            "description": "Confidence in the BAND, not the exact count.",
-        },
-        "reasoning": {
-            "type": "string",
-            "description": "One or two sentences on what the source said.",
+            "enum": ["high", "low"],
+            "description": "Confidence in the BAND. 'low' means near a band boundary.",
         },
     },
-    "required": ["found", "tier", "site_count", "source_url", "source_kind",
-                 "as_of_year", "confidence", "reasoning"],
+    "required": ["found", "tier", "site_count", "confidence"],
     "additionalProperties": False,
 }
+
+
+def round_up_band(tier: str) -> str:
+    """Bumps a tier one band up, per the operator's explicit rounding rule:
+    an uncertain Tier 3 becomes Tier 2, an uncertain Tier 2 becomes Tier 1.
+
+    The asymmetry is intentional - under-tiering a real prospect costs a
+    missed opportunity, over-tiering costs a little wasted attention, and
+    the tier bands are wide enough that edge cases are genuinely low-stakes.
+    Tier 1 is already the top band, so it stays put.
+    """
+    index = TIER_BANDS.index(tier)
+    return TIER_BANDS[min(index + 1, len(TIER_BANDS) - 1)]
 
 
 def _cache_path(brand: str) -> str:
@@ -186,15 +188,14 @@ def classify_tier(establishment_name: str) -> dict | None:
     import anthropic
 
     client = anthropic.Anthropic()
+    # No `effort` (errors on Haiku 4.5) and no `thinking` (Haiku 4.5 has no
+    # adaptive thinking; omitting it means none, which suits this task).
     response = client.messages.create(
         model=MODEL,
         max_tokens=4096,
         system=_SYSTEM,
         tools=[WEB_SEARCH_TOOL],
-        output_config={
-            "effort": EFFORT,
-            "format": {"type": "json_schema", "schema": _SCHEMA},
-        },
+        output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
         messages=[{
             "role": "user",
             "content": f"How many US locations does the restaurant chain "
@@ -210,19 +211,26 @@ def classify_tier(establishment_name: str) -> dict | None:
         return None
     parsed = json.loads(text)
 
-    # A low-confidence answer is treated as no answer: it falls through to
-    # the Tier 3 default, which is the documented behavior for an account
-    # the waterfall can't resolve.
-    if not parsed["found"] or parsed["confidence"] == "low":
-        _write_cache(cache_path, {})
+    if not parsed["found"]:
+        _write_cache(cache_path, {})  # cache the miss so we don't re-pay for it
         return None
 
+    # Near a band boundary, round UP rather than discard - the operator's
+    # explicit rule. See round_up_band().
+    tier = parsed["tier"]
+    rounded = parsed["confidence"] == "low"
+    if rounded:
+        tier = round_up_band(tier)
+
     result = {
-        "value": parsed["site_count"],
-        "tier_hint": parsed["tier"],
-        "source": f"{parsed['source_kind']}: {parsed['source_url']} (Rung 5, LLM+web search)",
+        # An exact count would override the rounded band in tier_for_lookup,
+        # defeating the rounding rule - so it is dropped when we rounded.
+        "value": None if rounded else parsed["site_count"],
+        "tier_hint": tier,
+        "source": f"LLM + web search, {MODEL} (Rung 5)"
+                  + (" [rounded up from band boundary]" if rounded else ""),
         "confidence": f"web_{parsed['confidence']}",
-        "as_of_date": date(parsed["as_of_year"], 1, 1) if parsed["as_of_year"] else None,
+        "as_of_date": None,
         "brand_name": candidate,
         "domain": None,
     }
