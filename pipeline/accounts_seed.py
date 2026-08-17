@@ -1,3 +1,5 @@
+from datetime import date
+
 # Curated seed list of ~28 multi-unit QSR/fast-casual brands, spanning all
 # four Bites tiers (Disqualified/Tier3/Tier2/Tier1), assembled from industry
 # knowledge for brand selection.
@@ -15,6 +17,13 @@
 # franchised_units/company_units (governance_model's real source, see
 # pipeline/tiering.py) come from the same table. Clay is used separately to
 # enrich HQ, employee count, and company type for HubSpot context.
+#
+# Under signal-first (docs/signal_first_architecture.md), this list is no
+# longer "the account list" - it's Rung 1's source data for
+# pipeline/site_count.py's waterfall lookup, fuzzy-matched against whatever
+# establishment name a real OSHA signal surfaces.
+
+QSR50_AS_OF_DATE = date(2026, 1, 1)  # QSR 50 2026 report, 2025 US unit counts
 
 SEED_ACCOUNTS = [
     # Tier 1 candidates (200+ sites)

@@ -25,7 +25,7 @@ Build a working prototype of a QSR prospecting engine for a GTM Engineer take-ho
 
 - **Amplemarket/Duo**: no API key yet, nothing tested. Blocked on the user obtaining a business-domain trial account (Amplemarket rejects a plain Gmail signup) — in progress in a separate session using the `wizard` skill. Needs the same verification rigor Clay got — does it actually return emails via API, does its company enrichment include site_count (probably not — assume no until tested), what's the auth/endpoint shape.
 - **Task #5 (signal scanners) — done.** `pipeline/osha_client.py` (HTTP + HTML parsing) and `pipeline/signal_scanner.py` (`scan_inspections`, `scan_violations`, `is_relevant_violation`) built and verified live against `osha.gov/ords/imis` — see `docs/osha_ords_imis_notes.md` for the real mechanics found (a swapped start/end date-field quirk on the site's own form, NAICS is one-per-request only, state-plan citations use non-federal standard numbering). Live run over the trailing 100-day window across all 3 restaurant NAICS: 268 Inspection triggers (248 Complaint/14 Accident/6 Fat-Cat), 0 Violation triggers this window (checked — 16 real citation line items existed, none matched the relevance filter; filter logic itself verified correct against synthetic known-relevant/known-irrelevant cases). Runnable via `scripts/scan_signals.py`.
-- **Site_count waterfall**: only Rung 1 (QSR50 static lookup) exists, and even that needs refactoring out of `accounts_seed.py`'s account-list shape into a plain lookup function. Rung 4 (Wikidata SPARQL) not built. Rungs 2/3/5 are deliberately narrated-not-built (need LLM-extraction from prose; deferred, see `account_sourcing_methodology.md`).
+- **Site_count waterfall — Rungs 1 and 4 done.** `pipeline/site_count.py` (`lookup_site_count()`) fuzzy-matches Rung 1 (QSR50/Contenders, refactored out of `accounts_seed.py`'s account-list shape) and queries Wikidata (`P8368`, "number of branches") for Rung 4, against the real, noisy establishment names OSHA signals surface. `pipeline/tiering.py:tier_for_lookup()` applies the tier logic. Verified live against all 258 unique establishments from a real scan: 13 resolved (12 via Rung 1, one genuine Rung 4 catch — 7 Brew Coffee, 604 sites, not in the 28-brand static list), 245 correctly default to Tier 3. See `docs/account_sourcing_methodology.md` for the full result and a real Wikidata rate-limit wrinkle hit and handled along the way. Rungs 2/3/5 remain deliberately unbuilt (need an LLM to extract a number from prose). Rungs 2/3/5 are deliberately narrated-not-built (need LLM-extraction from prose; deferred, see `account_sourcing_methodology.md`).
 - **Task #4 (contact resolution) never completed** — was blocked on Clay, now pivoting to Amplemarket; `resolve_contact` orchestration itself isn't built yet.
 - **`scripts/build_accounts.py` is stale** — written for the old account-first flow; needs replacing with a signal-first driver (accounts now come from the scanner, not a fixed seed list).
 - **Task #6 (signal handler)**: `qsr_signal` custom object creation isn't built yet (only Notes exists in `pipeline/hubspot_client.py`). Needs the "fire object+note+Slack together, skip sequence enrollment only for Fat/Cat" logic.
@@ -49,10 +49,9 @@ Build a working prototype of a QSR prospecting engine for a GTM Engineer take-ho
 ## Suggested next steps
 
 1. Get an Amplemarket (Duo) API key from the user and verify it the same way Clay was verified — real endpoints, real auth, does it actually return emails.
-2. Build the site_count waterfall for real: refactor Rung 1 out of `accounts_seed.py`, add Rung 4 (Wikidata).
-3. Build `resolve_contact` (Task #4) once Amplemarket access is confirmed, using the existing persona track definitions.
-4. Build the `qsr_signal` object creation + signal handler (Task #6), including the Fat/Cat sequence-exclusion rule, feeding off `scan_inspections()`/`scan_violations()`.
-5. Continue through Tasks #7–#9.
+2. Build `resolve_contact` (Task #4) once Amplemarket access is confirmed, using the existing persona track definitions.
+3. Build the `qsr_signal` object creation + signal handler (Task #6), including the Fat/Cat sequence-exclusion rule, feeding off `scan_inspections()`/`scan_violations()` and `lookup_site_count()`/`tier_for_lookup()`.
+4. Continue through Tasks #7–#9.
 
 ## Suggested skills
 

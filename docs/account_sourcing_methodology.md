@@ -61,3 +61,25 @@ Tier-3-by-default account should be flagged separately (e.g.
 status came from a real number — otherwise an unresolved account is
 indistinguishable from a confirmed small one, and the rare case of a large
 but obscure/under-reported chain would silently under-tier.
+
+## Built and verified (Task #5 follow-on)
+
+Rung 1 and Rung 4 are built in `pipeline/site_count.py`
+(`lookup_site_count()`), fuzzy-matched against whatever noisy establishment
+name a real OSHA signal surfaces (franchisee legal names, store numbers,
+"Llc"/"Inc" suffixes) — see that file's docstrings for the matching logic.
+`pipeline/tiering.py:tier_for_lookup()` applies the "unresolved defaults to
+Tier 3, but a real small count still disqualifies" rule.
+
+Verified live against the 258 real, unique establishments surfaced by
+`scan_inspections()` over a trailing 100-day window: 13 resolved — 12 via
+Rung 1 (McDonald's, Starbucks, Taco Bell, Wendy's, etc.), and one genuine
+Rung 4 catch outside the 28-brand static list: **7 Brew Coffee, 604 sites
+(Wikidata, Tier 1)**. The other 245 correctly default to Tier 3 — expected,
+since OSHA inspection volume skews toward independent/small operators, not
+national chains. Rungs 2/3/5 remain deliberately unbuilt, per above.
+
+Wikidata's anonymous API rate-limited partway through this batch (a 429 after
+enough back-to-back calls) — handled by treating a 429 as "unresolved this
+run" (falls through to the Tier 3 default) rather than crashing, plus a small
+delay between calls. See `pipeline/site_count.py` for specifics.
