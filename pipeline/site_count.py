@@ -8,6 +8,7 @@ from datetime import date
 import requests
 
 from pipeline.accounts_seed import QSR50_AS_OF_DATE, SEED_ACCOUNTS
+from pipeline.company_names import brand_name
 
 WIKIDATA_SEARCH_URL = "https://www.wikidata.org/w/api.php"
 WIKIDATA_ENTITY_URL = "https://www.wikidata.org/wiki/Special:EntityData"
@@ -25,26 +26,17 @@ BRANCH_COUNT_PROPERTY = "P8368"
 # confirmed live. Their API etiquette policy requires a descriptive one.
 _HEADERS = {"User-Agent": "BitesQSRProspectingEngine/1.0 (GTM Engineer take-home prototype)"}
 
-_LEGAL_SUFFIX_RE = re.compile(
-    r",?\s*(llc|inc\.?|incorporated|corp\.?|corporation|ltd\.?|lp)\.?$", re.IGNORECASE
-)
-_STORE_NUMBER_RE = re.compile(r"#\d+\s*$")
-
-
-def _strip_noise(name: str) -> str:
-    """Drops trailing store numbers and legal-entity suffixes, e.g.
-    'Yard House #8379' -> 'Yard House', 'Wendy'S Salt Lake City Llc' ->
-    'Wendy'S Salt Lake City'. Used as the Wikidata search candidate."""
-    name = _STORE_NUMBER_RE.sub("", name).strip()
-    return _LEGAL_SUFFIX_RE.sub("", name).strip()
-
-
 def _normalize(name: str) -> str:
-    """Lowercases, strips accents/punctuation and legal suffixes, for
-    comparing an OSHA establishment name against a known brand name."""
+    """Lowercases and strips accents/punctuation/legal suffixes, for
+    comparing an OSHA establishment name against a known brand name.
+
+    Runs pipeline.company_names.brand_name first, so case-number prefixes,
+    DBA franchisee wrappers and store numbers are already gone - without
+    that, '111589 - Chipotle Mexican Grill Inc' failed to match Chipotle
+    at all (confirmed against live data)."""
+    name = brand_name(name)
     name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     name = name.lower()
-    name = _STORE_NUMBER_RE.sub("", name)
     name = re.sub(r"[^a-z0-9 ]", "", name)
     name = re.sub(r"\b(llc|inc|incorporated|corp|corporation|co|ltd|lp)\b", "", name)
     return re.sub(r"\s+", " ", name).strip()
@@ -64,6 +56,12 @@ def _rung1_lookup(establishment_name: str) -> dict | None:
                 "source": "QSR Magazine QSR50/Contenders (Rung 1)",
                 "confidence": "verified",
                 "as_of_date": QSR50_AS_OF_DATE,
+                # Only Rung 1 carries a canonical brand identity (name +
+                # domain) - Rung 4/unresolved accounts have neither, since
+                # OSHA establishment names are franchisee legal names, not
+                # brand records. See pipeline/hubspot_client.py:upsert_signal_company.
+                "brand_name": seed["name"],
+                "domain": seed["domain"],
             }
     return None
 
@@ -99,7 +97,7 @@ def _rung4_wikidata_lookup(establishment_name: str) -> dict | None:
     P8368, so it falls through to the Tier 3 default rather than returning a
     wrong number.
     """
-    candidate = _strip_noise(establishment_name)
+    candidate = brand_name(establishment_name)
     if not candidate:
         return None
 
@@ -153,6 +151,8 @@ def _rung4_wikidata_lookup(establishment_name: str) -> dict | None:
         "source": f"Wikidata {qid} (P8368)",
         "confidence": "wikidata",
         "as_of_date": as_of,
+        "brand_name": None,
+        "domain": None,
     }
 
 
@@ -169,5 +169,12 @@ def lookup_site_count(establishment_name: str) -> dict:
     return (
         _rung1_lookup(establishment_name)
         or _rung4_wikidata_lookup(establishment_name)
-        or {"value": None, "source": None, "confidence": "estimated", "as_of_date": None}
+        or {
+            "value": None,
+            "source": None,
+            "confidence": "estimated",
+            "as_of_date": None,
+            "brand_name": None,
+            "domain": None,
+        }
     )

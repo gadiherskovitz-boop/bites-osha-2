@@ -1,8 +1,19 @@
+from __future__ import annotations
+
 import requests
 
 from pipeline.config import HUBSPOT_PRIVATE_APP_TOKEN
 
 BASE_URL = "https://api.hubapi.com"
+
+# The bare schema name ("qsr_signal") 400s ("Unable to infer object type")
+# against the actual object read/write/search endpoints - confirmed live -
+# even though it's what schema creation itself takes. Only the objectTypeId
+# or fully-qualified name (p<portalId>_qsr_signal) work there. Created once
+# via scripts/setup_qsr_signal_schema.py; objectTypeId is stable, so
+# hardcoded here rather than looked up on every call (same pattern as
+# pipeline/slack_client.py's CHANNELS).
+QSR_SIGNAL_OBJECT_TYPE = "2-252022394"
 
 
 def _headers():
@@ -69,6 +80,69 @@ def upsert_company(domain: str, properties: dict):
     return resp.json()
 
 
+def find_company_by_name(name: str):
+    resp = requests.post(
+        f"{BASE_URL}/crm/v3/objects/companies/search",
+        headers=_headers(),
+        json={
+            "filterGroups": [
+                {"filters": [{"propertyName": "name", "operator": "EQ", "value": name}]}
+            ],
+            "limit": 1,
+        },
+    )
+    resp.raise_for_status()
+    results = resp.json()["results"]
+    return results[0] if results else None
+
+
+def upsert_signal_company(name: str, domain: str | None, properties: dict):
+    """Company upsert for signal-sourced accounts, which often have no known
+    domain - OSHA gives an establishment name (frequently a franchisee's
+    legal name), not a canonical brand domain.
+
+    Resolution order: domain (authoritative) -> exact brand name. When a
+    domain IS known but only a domain-less record with the same brand name
+    exists, that record is adopted and backfilled with the domain rather
+    than creating a second one. Without this, a company created by another
+    source before this pipeline ran (a manual entry, an earlier import)
+    permanently shadows the signal-sourced record and a rep sees the brand
+    twice - which is exactly what happened to a pre-existing "Wendy's"
+    record in this portal.
+
+    Names still have to match exactly to converge. A residual gap remains
+    for brands whose OSHA establishment name never resolves to a canonical
+    brand (see pipeline/company_names.py) - closing that needs real domain
+    enrichment, the Clay/Amplemarket problem this project already hit.
+    """
+    existing = find_company_by_domain(domain) if domain else None
+    adopt_domain = False
+    if existing is None:
+        existing = find_company_by_name(name)
+        adopt_domain = existing is not None and bool(domain)
+
+    if existing:
+        patch = {**properties, "domain": domain} if adopt_domain else properties
+        resp = requests.patch(
+            f"{BASE_URL}/crm/v3/objects/companies/{existing['id']}",
+            headers=_headers(),
+            json={"properties": patch},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    create_properties = {**properties, "name": name}
+    if domain:
+        create_properties["domain"] = domain
+    resp = requests.post(
+        f"{BASE_URL}/crm/v3/objects/companies",
+        headers=_headers(),
+        json={"properties": create_properties},
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def find_contact_by_email(email: str):
     resp = requests.post(
         f"{BASE_URL}/crm/v3/objects/contacts/search",
@@ -110,6 +184,74 @@ def associate_contact_to_company(contact_id: str, company_id: str):
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def find_schema(name: str):
+    """GET /crm/v3/schemas/{name} 400s ('Unable to infer object type') for a
+    name that was never registered, rather than 404ing - confirmed live -
+    so existence is checked by listing all schemas instead."""
+    resp = requests.get(f"{BASE_URL}/crm/v3/schemas", headers=_headers())
+    resp.raise_for_status()
+    return next((s for s in resp.json()["results"] if s["name"] == name), None)
+
+
+def create_schema_if_missing(schema_def: dict):
+    existing = find_schema(schema_def["name"])
+    if existing:
+        return existing
+    resp = requests.post(f"{BASE_URL}/crm/v3/schemas", headers=_headers(), json=schema_def)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def find_qsr_signal(activity_nr: str, citation_id: str | None = None):
+    filters = [{"propertyName": "source_activity_nr", "operator": "EQ", "value": activity_nr}]
+    filters.append(
+        {"propertyName": "source_citation_id", "operator": "EQ", "value": citation_id}
+        if citation_id
+        else {"propertyName": "source_citation_id", "operator": "NOT_HAS_PROPERTY"}
+    )
+    resp = requests.post(
+        f"{BASE_URL}/crm/v3/objects/{QSR_SIGNAL_OBJECT_TYPE}/search",
+        headers=_headers(),
+        json={"filterGroups": [{"filters": filters}], "limit": 1},
+    )
+    resp.raise_for_status()
+    results = resp.json()["results"]
+    return results[0] if results else None
+
+
+def upsert_qsr_signal(company_id: str, properties: dict):
+    """Idempotent per (source_activity_nr, source_citation_id) - re-running
+    the scanner/handler over the same real OSHA event won't create a
+    duplicate qsr_signal record, matching the dedup pattern
+    upsert_company/find_contact_by_email already use elsewhere."""
+    existing = find_qsr_signal(
+        properties["source_activity_nr"], properties.get("source_citation_id")
+    )
+    if existing:
+        resp = requests.patch(
+            f"{BASE_URL}/crm/v3/objects/{QSR_SIGNAL_OBJECT_TYPE}/{existing['id']}",
+            headers=_headers(),
+            json={"properties": properties},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    resp = requests.post(
+        f"{BASE_URL}/crm/v3/objects/{QSR_SIGNAL_OBJECT_TYPE}",
+        headers=_headers(),
+        json={"properties": properties},
+    )
+    resp.raise_for_status()
+    signal = resp.json()
+
+    assoc = requests.put(
+        f"{BASE_URL}/crm/v4/objects/{QSR_SIGNAL_OBJECT_TYPE}/{signal['id']}/associations/default/companies/{company_id}",
+        headers=_headers(),
+    )
+    assoc.raise_for_status()
+    return signal
 
 
 def create_note(company_id: str, note_body: str):

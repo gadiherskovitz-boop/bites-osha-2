@@ -29,6 +29,44 @@ def _parse_int(text: str | None) -> int:
     return int(text) if text else 0
 
 
+def _parse_listing_table(html: str) -> list[dict]:
+    """Shared row parser for industry.search and establishment.search - both
+    render the identical 12-column results table (checkbox, #, Activity,
+    Date Opened, RID, State, Type, Scope, SIC, NAICS, Violations,
+    Establishment Name), no <tbody> in the raw source in either case."""
+    if "did not return any results" in html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    table = next(
+        t for t in soup.find_all("table") if "Establishment Name" in t.get_text()
+    )
+    rows = table.find_all("tr")[1:]  # drop header row
+
+    results = []
+    for row in rows:
+        cells = row.find_all("td")
+        if len(cells) != 12:
+            continue
+        activity_link = cells[2].find("a")
+        results.append(
+            {
+                "activity_nr": _clean(activity_link.get_text()),
+                "is_open": activity_link.find("em") is not None,
+                "date_opened": _parse_date(cells[3].get_text()),
+                "office_rid": _clean(cells[4].get_text()),
+                "state": _clean(cells[5].get_text()),
+                "insp_type": _clean(cells[6].get_text()),
+                "scope": _clean(cells[7].get_text()),
+                "sic": _clean(cells[8].get_text()),
+                "naics": _clean(cells[9].get_text()),
+                "violations_count": _parse_int(cells[10].get_text()),
+                "establishment_name": _clean(cells[11].get_text()),
+            }
+        )
+    return results
+
+
 def industry_search(naics: str, start_date: date, end_date: date, page_size: int = 2000) -> list[dict]:
     """Lists inspections for one NAICS code opened within [start_date, end_date].
 
@@ -42,6 +80,8 @@ def industry_search(naics: str, start_date: date, end_date: date, page_size: int
     live form's `title` attributes and by round-tripping a query and reading
     back the "Inspection Date Range" the results page echoes. Get this
     backwards and the query silently returns the wrong (or an empty) range.
+    This is industry.search-specific - establishment_search below is a
+    DIFFERENT form with the opposite (non-swapped) field semantics.
     """
     resp = requests.get(
         f"{BASE_URL}/industry.search",
@@ -68,40 +108,55 @@ def industry_search(naics: str, start_date: date, end_date: date, page_size: int
         timeout=30,
     )
     resp.raise_for_status()
+    return _parse_listing_table(resp.text)
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    if "did not return any results" in resp.text:
-        return []
 
-    table = next(
-        t for t in soup.find_all("table") if "Establishment Name" in t.get_text()
+def establishment_search(
+    name: str, start_date: date, end_date: date, state: str = "all", page_size: int = 500
+) -> list[dict]:
+    """Lists inspections for any establishment whose name contains `name`
+    (substring match, e.g. 'Wendy'S' also matches 'Wendy'S Salt Lake City
+    Llc'), across ALL its locations nationally - a brand-wide history, not
+    one site's. Used for the "how many times has this brand been hit
+    recently" sales context, not for signal discovery.
+
+    Unlike industry_search's swapped fields, THIS form's `startyear`/
+    `startmonth`/`startday` genuinely is the earlier bound and `endyear`/
+    `endmonth`/`endday` the later one - confirmed via the live form's field
+    order relative to its "Start Date"/"End Date" labels (no misleading
+    `title` attribute here, unlike industry.search). The backend also
+    appears tolerant of the two being swapped in practice (tested both ways,
+    identical results) - but this function uses the documented-correct
+    mapping regardless, rather than relying on that leniency.
+
+    Live-verified scale: 6 results for "El Pollo Loco" since 2000, 29 for
+    "Wendy'S" and 53 for "McDonald's" over ~2.5 years nationally - bounded
+    enough to call per-signal, not just in a bulk scan.
+    """
+    resp = requests.get(
+        f"{BASE_URL}/establishment.search",
+        params={
+            "p_logger": 1,
+            "establishment": name,
+            "State": state,
+            "officetype": "All",
+            "Office": "All",
+            "SIC": "",
+            "NAICS": "",
+            "FedAgnCode": "",
+            "Insp_Type": "",
+            "startmonth": f"{start_date.month:02d}",
+            "startday": f"{start_date.day:02d}",
+            "startyear": start_date.year,
+            "endmonth": f"{end_date.month:02d}",
+            "endday": f"{end_date.day:02d}",
+            "endyear": end_date.year,
+            "p_show": page_size,
+        },
+        timeout=30,
     )
-    # No <tbody> in the raw source here (unlike establishment.inspection_detail's
-    # tables) - html.parser doesn't synthesize one, so query <tr> directly.
-    rows = table.find_all("tr")[1:]  # drop header row
-
-    results = []
-    for row in rows:
-        cells = row.find_all("td")
-        if len(cells) != 12:
-            continue
-        activity_link = cells[2].find("a")
-        results.append(
-            {
-                "activity_nr": _clean(activity_link.get_text()),
-                "is_open": activity_link.find("em") is not None,
-                "date_opened": _parse_date(cells[3].get_text()),
-                "office_rid": _clean(cells[4].get_text()),
-                "state": _clean(cells[5].get_text()),
-                "insp_type": _clean(cells[6].get_text()),
-                "scope": _clean(cells[7].get_text()),
-                "sic": _clean(cells[8].get_text()),
-                "naics": _clean(cells[9].get_text()),
-                "violations_count": _parse_int(cells[10].get_text()),
-                "establishment_name": _clean(cells[11].get_text()),
-            }
-        )
-    return results
+    resp.raise_for_status()
+    return _parse_listing_table(resp.text)
 
 
 def _text_after_label(soup: BeautifulSoup, label: str) -> str:
@@ -182,3 +237,32 @@ def inspection_detail(activity_nr: str) -> dict:
         "case_closed_date": _parse_date(_text_after_label(soup, "Case Closed")),
         "violations": violations,
     }
+
+
+def violation_narrative(activity_nr: str, citation_id: str) -> str | None:
+    """The real, specific hazard description for one citation line item, e.g.
+    '29 CFR 1910.36(g)(2): Exit access(es) were not at least 28 inches wide
+    ... Stewarding Kitchen: A path to an outside exit door ... measured 26
+    inches in width.' - confirmed live on a real federal citation.
+
+    Federal citations only - confirmed live that state-plan citations (e.g.
+    California's) simply don't have a 'Text For Citation' section on this
+    page at all. Returns None in that case, or if the section is genuinely
+    absent for any other reason - callers should fall back to standard/
+    classification rather than treat None as an error.
+    """
+    resp = requests.get(
+        f"{BASE_URL}/establishment.violation_detail",
+        params={"id": activity_nr, "citation_id": citation_id},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    label = next(
+        (p for p in soup.find_all("p") if "Text For Citation" in p.get_text()), None
+    )
+    if label is None:
+        return None
+    narrative_p = label.find_next_sibling("p")
+    return _clean(narrative_p.get_text()) if narrative_p else None
