@@ -160,24 +160,22 @@ def _is_restaurant_chain(company_name: str, cache: dict[str, bool]) -> bool:
     category+phrase filter. Real signal was ~15 genuine QSR hits out of 401
     raw results (~4%).
 
-    Per an explicit user decision, this reuses Rung 5's classifier
-    (pipeline/tier_classifier.py:classify_tier, Claude Haiku + web search)
-    rather than a hand-written keyword list - it already asks exactly this
-    question ("does this name resolve to a real restaurant chain?") for
-    site_count tiering, and it's cached permanently per brand on disk, so a
-    cache hit here is a cache hit later too when handle_hiring_signal
-    resolves the same company's tier. `cache` is an in-run memo on top of
-    that disk cache, since a handful of companies (GardaWorld, Four
-    Seasons, Walmart) appeared 3-7 times in the first real run.
-
-    Checks tier_for_lookup() on the result, not just whether classify_tier
-    found anything - a real miss found live: "Reser's Fine Foods, Inc." (a
-    food MANUFACTURER, not a restaurant chain) got found=true with
-    tier_hint="Disqualified" - the model located some real but tiny
-    restaurant-adjacent presence (5 or fewer locations) tied to the brand.
-    tier_for_lookup() already treats "Disqualified" as "not a prospect" -
-    reusing it here instead of a bare found-or-not check keeps that one
-    rule defined in one place.
+    Calls pipeline/hiring_industry_classifier.py:is_restaurant_chain - a
+    small, dedicated classifier built specifically for this question,
+    deliberately NOT pipeline/tier_classifier.py's classify_tier (Rung 5 of
+    the OSHA path's site_count waterfall). classify_tier's prompt
+    presupposes the input already IS a restaurant chain (correct for OSHA,
+    where every establishment name is restaurant-NAICS-scoped by
+    construction) and was confirmed live to wrongly accept "Marriott Hotels
+    Resorts" - it found a real 321-US-location count and reported it,
+    since the prompt never asked whether Marriott is a restaurant chain in
+    the first place. Fixing that in place would mean changing shared,
+    already-verified, presentation-critical OSHA infrastructure to solve a
+    problem that's specific to this Adzuna layer - not worth that risk for
+    a small, separable question. `cache` is an in-run memo on top of
+    is_restaurant_chain's own permanent disk cache, since a handful of
+    companies (GardaWorld, Four Seasons, Walmart) appeared 3-7 times in the
+    first real run.
 
     Fails CLOSED (excludes) rather than open when the classifier can't run
     - either no ANTHROPIC_API_KEY, or a real call failure (confirmed live:
@@ -188,11 +186,18 @@ def _is_restaurant_chain(company_name: str, cache: dict[str, bool]) -> bool:
     "can't classify" should not silently mean "include everything" - it
     would just reproduce the 401-result problem this was built to fix.
 
-    A call failure (as opposed to a missing key) is NOT retried per
-    company - `_UNAVAILABLE` short-circuits every remaining lookup in this
-    `cache` once one real call fails, since a billing/auth failure is
-    persistent and would otherwise mean paying the same latency for every
-    company in the scan only to fail identically each time.
+    Two different failure shapes are handled differently, a distinction
+    found necessary live: an exhausted credit balance (`anthropic.
+    APIStatusError` - auth/billing/rate-limit, everything the SDK raises
+    for a real API-level rejection) is PERSISTENT - every subsequent call
+    will fail identically, so `_UNAVAILABLE` short-circuits every
+    remaining lookup in this `cache` rather than paying the same latency
+    ~150 times to fail the same way. A one-off response glitch (confirmed
+    live: a single malformed-JSON response broke json.loads for one
+    specific company, unrelated to any of the others) is NOT persistent -
+    retrying it wouldn't help, but nor should it be treated as if every
+    other company would fail too. Only that one company is excluded; the
+    scan continues.
     """
     if cache.get(_UNAVAILABLE):
         return False
@@ -200,15 +205,18 @@ def _is_restaurant_chain(company_name: str, cache: dict[str, bool]) -> bool:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             cache[company_name] = False
         else:
-            from pipeline.tier_classifier import classify_tier
-            from pipeline.tiering import tier_for_lookup
+            import anthropic
+
+            from pipeline.hiring_industry_classifier import is_restaurant_chain
 
             try:
-                result = classify_tier(company_name)
-                cache[company_name] = result is not None and tier_for_lookup(result) is not None
-            except Exception as e:
+                cache[company_name] = is_restaurant_chain(company_name)
+            except anthropic.APIStatusError as e:
                 print(f"  (restaurant-chain classifier unavailable, excluding remaining Adzuna results: {e})")
                 cache[_UNAVAILABLE] = True
+                cache[company_name] = False
+            except Exception as e:
+                print(f"  (restaurant-chain classifier failed for {company_name!r}, excluding just this one: {e})")
                 cache[company_name] = False
     return cache[company_name]
 
