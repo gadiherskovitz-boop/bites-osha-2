@@ -27,7 +27,8 @@ def main():
         print(
             f"[{label}] {signal['establishment_name']} -> company {result['company_id']}, "
             f"{result['tier']}, sequence_eligible={result['sequence_eligible']}, "
-            f"sequence_enrollment={result['sequence_enrollment']}"
+            f"sequence_enrollment={result['sequence_enrollment']}, "
+            f"tier1_first_touch={result['tier1_first_touch']}"
         )
 
 

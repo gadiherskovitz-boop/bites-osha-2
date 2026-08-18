@@ -301,7 +301,18 @@ def enroll_in_sequence(contact_id: str, sequence_id: str, sender_email: str, use
     return resp.json()
 
 
-def create_note(company_id: str, note_body: str):
+# Association type IDs, verified live 2026-08-18 via
+# GET /crm/v4/associations/notes/contacts/labels (Note-to-Contact) - same
+# constant-not-relooked-up-per-call pattern as QSR_SIGNAL_OBJECT_TYPE above.
+NOTE_TO_COMPANY = 190
+NOTE_TO_CONTACT = 202
+
+
+def create_note(object_id: str, note_body: str, association_type_id: int = NOTE_TO_COMPANY):
+    """Defaults to Note-to-Company (existing Task #6 behavior, unchanged for
+    all current call sites). Pass NOTE_TO_CONTACT for a Contact - added for
+    Task #8's first-touch draft, which lives on the contact it's addressed
+    to, not the company."""
     resp = requests.post(
         f"{BASE_URL}/crm/v3/objects/notes",
         headers=_headers(),
@@ -312,11 +323,11 @@ def create_note(company_id: str, note_body: str):
             },
             "associations": [
                 {
-                    "to": {"id": company_id},
+                    "to": {"id": object_id},
                     "types": [
                         {
                             "associationCategory": "HUBSPOT_DEFINED",
-                            "associationTypeId": 190,  # Note to Company
+                            "associationTypeId": association_type_id,
                         }
                     ],
                 }

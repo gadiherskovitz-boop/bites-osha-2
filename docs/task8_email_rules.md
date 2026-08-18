@@ -148,6 +148,49 @@ We've helped Unilever reach 90%+ training engagement, and I'd be glad to walk th
 Task #4 (`resolve_contact`) lands. Everything else — the real signal, the
 real account, the rules, the generation call — is real and verified now.
 
+## The practical delivery mechanism — verified live 2026-08-18
+
+Real question, worked through with the user: once drafted, how does the
+email actually reach the AE in a form they can use? HubSpot Sequences
+don't support per-contact custom step content via the API — confirmed
+against HubSpot's own docs: sequence steps are templates with
+personalization tokens off contact properties, not free-form generated
+text, and the actual sequence built for this (`QSR T1 - OSHA Trigger -
+Bites Assignment`, id `846871794`, a To-do step) has no email step to
+inject into regardless.
+
+**Answer: a Note on the Contact, not the Company** — `pipeline/hubspot_client.py:create_note()`
+generalized to take an `association_type_id` param (`NOTE_TO_COMPANY = 190`,
+existing default; `NOTE_TO_CONTACT = 202`, verified live via
+`GET /crm/v4/associations/notes/contacts/labels`), plus
+`pipeline/signal_handler.py:_maybe_draft_and_note_first_touch()`: drafts the
+email, writes it as a Note on the resolved contact, then auto-enrolls that
+contact into the Tier 1 sequence — same `enroll_in_sequence()` mechanism
+Task #7 built, just pointed at `HUBSPOT_TIER1_SEQUENCE_ID`. The Tier 1
+to-do task is the reminder; the Note is where the actual draft lives for
+the AE to copy from.
+
+**Verified live end-to-end** against a real demo contact (John Carothers,
+`836672389325`) with the real Chipotle Complaint signal: the resulting
+Note read back exactly as generated (140-word draft, correctly personalized
+to "John," "Chipotle-branded video"), and enrollment succeeded
+(`{"attempted": true, "sequence_id": "846871794", ...}`).
+
+**One real HubSpot constraint found along the way**: a contact can only be
+enrolled in one sequence at a time — a second enrollment attempt 400s with
+`SequenceError.CONTACT_ALREADY_ENROLLED` (hit this first against Gordon
+Penny, already enrolled from Task #7's Tier 3 test; the Note write had
+already succeeded by that point in the call, so Gordon's contact carries a
+harmless leftover test Note). Not a practical problem for this pipeline — a
+real contact only ever belongs to one tier — but worth knowing if a contact
+somehow needed both.
+
+`_maybe_enroll_in_sequence()`'s Tier 3 gate and
+`_maybe_draft_and_note_first_touch()`'s Tier 1 gate are both wired into
+`handle_signal()`, which now takes `contact: dict | None` (`{"id", "name",
+"title"}`) instead of a bare `contact_id` string, since drafting needs the
+name/title Task #7's enrollment-only path never did.
+
 ## Files
 
 - `pipeline/personalize.py` — `SYSTEM_PROMPT` (embeds `REFERENCE_DRAFT` as a
@@ -155,3 +198,7 @@ real account, the rules, the generation call — is real and verified now.
   `REFERENCE_DRAFT`, `build_user_prompt()`, `draft_first_touch()`.
 - `scripts/draft_first_touch.py` — runnable driver, hardcoded to the real
   Chipotle Complaint signal.
+- `pipeline/hubspot_client.py` — `create_note()` generalized with
+  `NOTE_TO_COMPANY` / `NOTE_TO_CONTACT`.
+- `pipeline/signal_handler.py` — `_maybe_draft_and_note_first_touch()`,
+  `_render_note_body()`, `handle_signal(signal, contact=None)`.

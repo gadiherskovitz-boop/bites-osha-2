@@ -6,6 +6,7 @@ from datetime import date
 from pipeline.accounts_seed import history_is_complete
 from pipeline.brand_history import year_summary
 from pipeline.hubspot_client import (
+    NOTE_TO_CONTACT,
     create_note,
     enroll_in_sequence,
     upsert_qsr_signal,
@@ -13,6 +14,7 @@ from pipeline.hubspot_client import (
 )
 from pipeline.osha_client import violation_narrative
 from pipeline.company_names import brand_name
+from pipeline.personalize import draft_first_touch
 from pipeline.site_count import lookup_site_count
 from pipeline.slack_client import CHANNELS, post_message
 from pipeline.tiering import tier_for_lookup
@@ -21,12 +23,14 @@ from pipeline.tiering import tier_for_lookup
 # this is shown honestly rather than faked. See HANDOFF.md.
 SUGGESTED_CONTACT_PLACEHOLDER = "Pending — contact resolution not yet wired up (Task #4, blocked on Amplemarket)"
 
-# Tier 3 sequence enrollment (Task #7) needs a sequence created once by a
-# human in the HubSpot UI (no public create-sequence endpoint - see
-# docs/task7_workflow_notes.md) plus a connected sender inbox. All three are
-# unset until that setup happens; enrollment is skipped cleanly until then,
-# same pattern as the Rung 5 ANTHROPIC_API_KEY gate.
+# Sequence enrollment (Task #7 for Tier 3, Task #8 for Tier 1) needs a
+# sequence created once by a human in the HubSpot UI (no public
+# create-sequence endpoint - see docs/task7_workflow_notes.md) plus a
+# connected sender inbox. All unset until that setup happens; enrollment is
+# skipped cleanly until then, same pattern as the Rung 5 ANTHROPIC_API_KEY
+# gate.
 TIER3_SEQUENCE_ID = os.environ.get("HUBSPOT_TIER3_SEQUENCE_ID")
+TIER1_SEQUENCE_ID = os.environ.get("HUBSPOT_TIER1_SEQUENCE_ID")
 SEQUENCE_SENDER_EMAIL = os.environ.get("HUBSPOT_SENDER_EMAIL")
 SEQUENCE_SENDER_USER_ID = os.environ.get("HUBSPOT_SENDER_USER_ID")
 
@@ -177,9 +181,12 @@ def _render_note(lines: list[tuple[str, str, str]]) -> str:
 
 def _maybe_enroll_in_sequence(tier: str | None, sequence_eligible: bool, contact_id: str | None) -> dict:
     """Tier 3, non-Fat/Cat signals auto-enroll their resolved contact into the
-    Tier 3 call-task sequence - the one behavior Task #7 adds. Tier 1 is
-    deliberately excluded here: its sequence exists but is sent manually by
-    an AE (Task #8), never auto-enrolled.
+    Tier 3 to-do sequence - the one behavior Task #7 adds. Tier 1's
+    enrollment is separate (_maybe_draft_and_note_first_touch) since it
+    also has to draft and attach the personalized email first - "manual"
+    for Tier 1 (per docs/signal_first_architecture.md) describes the AE
+    sending the email personally, not the enrollment itself; the to-do task
+    step in either sequence is harmless to auto-enroll into.
 
     No native HubSpot workflow object watches for qsr_signal creation and
     triggers this separately - this function IS that trigger. A workflow
@@ -205,16 +212,54 @@ def _maybe_enroll_in_sequence(tier: str | None, sequence_eligible: bool, contact
     return {"attempted": True, "sequence_id": TIER3_SEQUENCE_ID}
 
 
-def handle_signal(signal: dict, contact_id: str | None = None) -> dict:
+def _render_note_body(subject: str, body: str) -> str:
+    paragraphs = body.split("\n\n")
+    return f"<strong>Subject:</strong> {subject}<br><br>" + "<br><br>".join(
+        p.replace("\n", "<br>") for p in paragraphs
+    )
+
+
+def _maybe_draft_and_note_first_touch(
+    signal: dict, account_name: str, tier: str | None, sequence_eligible: bool, contact: dict | None
+) -> dict:
+    """Tier 1, non-Fat/Cat signals get the one fully-drafted GTM motion
+    (Task #8): a personalized first-touch email, written by
+    pipeline/personalize.py:draft_first_touch() and attached as a Note on
+    the resolved Contact - not the Company, since it's addressed to a
+    specific person. The contact is then auto-enrolled in the Tier 1
+    to-do sequence, whose task points the AE at that Note to review and
+    send personally (see docs/task8_email_rules.md and the design
+    discussion that led here - HubSpot sequences don't support per-contact
+    custom step content, so a Note is where the draft actually lives).
+
+    `contact` is {"id", "name", "title"} once Task #4 (resolve_contact)
+    exists - None until then, in which case this is skipped and reported,
+    same honesty pattern as _maybe_enroll_in_sequence.
+    """
+    if tier != "Tier 1" or not sequence_eligible:
+        return {"attempted": False, "reason": "not Tier 1 / not sequence-eligible"}
+    if not contact:
+        return {"attempted": False, "reason": "no resolved contact yet (Task #4, blocked on Amplemarket)"}
+    if not (TIER1_SEQUENCE_ID and SEQUENCE_SENDER_EMAIL and SEQUENCE_SENDER_USER_ID):
+        return {"attempted": False, "reason": "Tier 1 sequence not configured (see docs/task8_email_rules.md)"}
+
+    draft = draft_first_touch(signal, account_name, contact)
+    create_note(contact["id"], _render_note_body(draft["subject"], draft["body"]), NOTE_TO_CONTACT)
+    enroll_in_sequence(contact["id"], TIER1_SEQUENCE_ID, SEQUENCE_SENDER_EMAIL, SEQUENCE_SENDER_USER_ID)
+    return {"attempted": True, "sequence_id": TIER1_SEQUENCE_ID, "draft_subject": draft["subject"]}
+
+
+def handle_signal(signal: dict, contact: dict | None = None) -> dict:
     """Fires the qsr_signal object + Company Note + Slack alert together for
     one real signal, per docs/signal_first_architecture.md step 5. All three
     fire for every signal, including Fat/Cat - the only Fat/Cat-specific
-    behavior is the returned sequence_eligible flag, which gates Tier 3
-    sequence enrollment (Task #7, see _maybe_enroll_in_sequence).
+    behavior is the returned sequence_eligible flag, which gates both Tier 3
+    sequence enrollment (Task #7) and the Tier 1 drafted-email + enrollment
+    (Task #8).
 
-    `contact_id` is the resolved contact to enroll if eligible - None until
-    Task #4 (resolve_contact) lands, in which case enrollment is skipped and
-    reported honestly rather than faked.
+    `contact` is {"id", "name", "title"} once Task #4 (resolve_contact)
+    lands - None until then, in which case both Tier 3 enrollment and the
+    Tier 1 draft are skipped and reported honestly rather than faked.
     """
     lookup = lookup_site_count(signal["establishment_name"])
     tier = tier_for_lookup(lookup)
@@ -261,10 +306,13 @@ def handle_signal(signal: dict, contact_id: str | None = None) -> dict:
 
     is_fat_cat = subtype == "Fat/Cat"
     sequence_eligible = not is_fat_cat
+    contact_id = contact["id"] if contact else None
     enrollment = _maybe_enroll_in_sequence(tier, sequence_eligible, contact_id)
+    first_touch = _maybe_draft_and_note_first_touch(signal, account_name, tier, sequence_eligible, contact)
     return {
         "company_id": company_id,
         "tier": tier,
         "sequence_eligible": sequence_eligible,
         "sequence_enrollment": enrollment,
+        "tier1_first_touch": first_touch,
     }
