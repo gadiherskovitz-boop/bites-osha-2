@@ -186,6 +186,41 @@ def associate_contact_to_company(contact_id: str, company_id: str):
     return resp.json()
 
 
+# "One to One" (Sales) subscription - found live via the subscriptions list
+# endpoint while building Task #7. Needed before enroll_in_sequence(): a
+# contact with no recorded legal basis 400s with SequenceError.UNSUBSCRIBED
+# on this EU-hosted portal, confirmed live twice (Task #7 and #8 testing).
+# See docs/task7_workflow_notes.md.
+ONE_TO_ONE_SUBSCRIPTION_ID = "3303612298"
+
+
+def subscribe_contact(email: str, subscription_id: str = ONE_TO_ONE_SUBSCRIPTION_ID):
+    """legalBasis/legalBasisExplanation are undocumented as required in the
+    v3 guide (marked optional there) but this portal 400s without them:
+    "Legal Basis is required for resubscribing a contact on GDPR enabled
+    portals" - confirmed live, 2026-08-18, not caught in the earlier Task #7
+    investigation. LEGITIMATE_INTEREST_CLIENT, not CONSENT_WITH_NOTICE - this
+    contact never opted in; the honest basis for cold B2B outreach to a
+    business role via public professional information is legitimate
+    interest, not consent."""
+    resp = requests.post(
+        f"{BASE_URL}/communication-preferences/v3/subscribe",
+        headers=_headers(),
+        json={
+            "emailAddress": email,
+            "subscriptionId": subscription_id,
+            "legalBasis": "LEGITIMATE_INTEREST_CLIENT",
+            "legalBasisExplanation": (
+                "B2B sales outreach to a corporate role, identified via public "
+                "professional information, in connection with a public OSHA "
+                "regulatory signal at the contact's employer."
+            ),
+        },
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def find_schema(name: str):
     """GET /crm/v3/schemas/{name} 400s ('Unable to infer object type') for a
     name that was never registered, rather than 404ing - confirmed live -
@@ -295,6 +330,36 @@ def enroll_in_sequence(contact_id: str, sequence_id: str, sender_email: str, use
             "contactId": contact_id,
             "sequenceId": sequence_id,
             "senderEmail": sender_email,
+        },
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+# "One to One" (Sales) subscription - found via GET /communication-
+# preferences/v3/definitions during Task #7's live testing. This EU-hosted
+# portal enforces GDPR consent on Sequence enrollment regardless of whether
+# the sequence has email steps - every contact defaults to no legal basis
+# for one-to-one communication until one is explicitly recorded here, or
+# enroll_in_sequence() 400s with SequenceError.UNSUBSCRIBED. Needs
+# communication_preferences.read_write. See docs/task7_workflow_notes.md.
+ONE_TO_ONE_SUBSCRIPTION_ID = "3303612298"
+
+
+def subscribe_contact(email: str, legal_basis_explanation: str = "Real signal-derived B2B sales outreach"):
+    """Records a legal basis for one-to-one (Sales) communication - real
+    write to a consent record, not a CRM property, hence its own endpoint
+    rather than a normal PATCH (confirmed live: writing hs_marketable_status
+    directly through the contacts PATCH endpoint silently no-ops). Call
+    once per contact before enroll_in_sequence(), or enrollment fails."""
+    resp = requests.post(
+        f"{BASE_URL}/communication-preferences/v3/subscribe",
+        headers=_headers(),
+        json={
+            "emailAddress": email,
+            "subscriptionId": ONE_TO_ONE_SUBSCRIPTION_ID,
+            "legalBasis": "CONSENT_WITH_NOTICE",
+            "legalBasisExplanation": legal_basis_explanation,
         },
     )
     resp.raise_for_status()
