@@ -140,9 +140,14 @@ the HubSpot UI, same as before).
 
 ## Hiring trigger
 
-Out of scope for this build beyond the persona-track definition; expected to
-follow the same steps 2-5 once built, with Greenhouse/Lever job-board APIs as
-its own step-1 source instead of OSHA data.
+**Active build focus as of 2026-08-18.** The OSHA signal path is fully built
+except for Task #4 (`resolve_contact`, blocked on Amplemarket - see
+`HANDOFF.md`); rather than idle waiting on that, the build moved to the
+Hiring trigger, which doesn't depend on it. Persona tracks are already
+defined (`pipeline/persona_tracks.py:HIRING_TRACKS`); everything else below
+is still to be built, following the same steps 2-5 as the OSHA path once
+step 1 exists, with Greenhouse/Lever job-board APIs as its own step-1
+source instead of OSHA data.
 
 ## What this changes from the original plan
 
