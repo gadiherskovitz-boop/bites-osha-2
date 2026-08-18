@@ -139,7 +139,7 @@ postings are "Manager/Leader in Training" frontline variants — correctly
 excluded — confirming the 0-signal live result is real, not a filter bug
 silently missing something.
 
-## Adzuna — the industry-wide scan, unverified
+## Adzuna — the industry-wide scan, now live-tuned
 
 Per the planning round: Adzuna is a real, documented, free-tier (1,000
 calls/month) job aggregator with a genuine keyword-search API — the one
@@ -148,30 +148,72 @@ all three ATS-native sources). Indeed's Publisher API died in 2023
 (replacement is an NDA-gated six-figure enterprise deal); LinkedIn has no
 public Jobs API and its ToS prohibits scraping — both ruled out.
 
-**Not tested live** — it needs a free developer account
-(`developer.adzuna.com`), and creating third-party accounts isn't
-something this pipeline does unilaterally; the user needs to sign up and
-drop `ADZUNA_APP_ID`/`ADZUNA_APP_KEY` into `.env` (see `.env.example`).
-`pipeline/adzuna_client.py` and `pipeline/hiring_scanner.py:
-scan_adzuna_hiring_signals` are written against Adzuna's documented API
-shape, gated to skip cleanly when the keys aren't set (same pattern as
-`ANTHROPIC_API_KEY`), and treated as a **discovery** layer — feeding new
-companies into consideration, not replacing the ATS-native scan, which
-gives cleaner, more complete data once a company is known.
+The user created a free developer account (`developer.adzuna.com`) and
+provided real credentials, letting this go from "written against docs" to
+actually tuned against live data. Three real corrections came out of that:
 
-Two real, acknowledged gaps in the Adzuna integration specifically, since
-they can't be resolved without a live response to tune against:
-- **Industry scoping**: Adzuna has no confirmed restaurant/QSR category
-  slug, so `INDUSTRY_KEYWORDS` (a keyword check against
-  title+description+company for "restaurant," "QSR," "franchise,"
-  "hospitality," etc.) is a first-pass heuristic, not a verified filter.
-- **Field mapping**: response shapes (`company.display_name`, `created`,
-  `redirect_url`, etc.) are per Adzuna's public docs, not confirmed
-  against a real payload.
+1. **`what` does not support inline boolean/OR syntax.** A combined
+   `'"learning and development" OR "training manager"'` query silently
+   returned 0 results — no error, just nothing. Only `what_phrase` (exact
+   phrase) is real; OR-of-phrases means one API call per phrase
+   (`ADZUNA_PHRASES`), merged and deduped by job id.
+2. **Adzuna's real `category` taxonomy includes `hospitality-catering-jobs`
+   and `hr-jobs`** (`GET /v1/api/jobs/us/categories`) — both surface
+   genuine hits combined with the phrases above ("Learning & Development
+   Manager" at McDonald's, "Training Manager" at Dunkin', "Restaurant
+   Training Coordinator" at Chick-fil-A). But **neither category is close
+   to precise enough alone** — the first full live run (4 phrases × 2
+   categories) returned 401 raw results, and manual inspection showed
+   roughly 4% were genuine QSR/restaurant-chain hits. The rest: hotels/
+   casinos (Marriott, Four Seasons, MGM, Wynn Las Vegas), banks (5+), law
+   firms, food *manufacturers* (Georgia-Pacific, Schwan's, Reser's Fine
+   Foods), retail (Walmart ×6), security firms (GardaWorld ×7), aerospace/
+   defense (Northrop Grumman, Ford), even a boutique fitness chain
+   (`[solidcore]`) whose postings just say "Training Manager" plain,
+   missing the `PERSONAL_TRAINING_PATTERN` exclusion.
+3. **Real fix, per an explicit user decision**: reuse Rung 5's classifier
+   (`pipeline/tier_classifier.py:classify_tier`, Claude Haiku + web search)
+   as the industry-precision filter (`pipeline/hiring_scanner.py:
+   _is_restaurant_chain`), rather than a hand-written keyword list — it
+   already asks exactly "does this name resolve to a real restaurant
+   chain?" for site_count tiering, and its permanent per-brand disk cache
+   means a hit here is a hit later too when `handle_hiring_signal` resolves
+   the same company's tier. **Found a second real precision gap while
+   wiring this in**: `classify_tier` returned `found=true` for "Reser's
+   Fine Foods, Inc." (a food manufacturer) with `tier_hint="Disqualified"`
+   — some real but tiny (≤5 location) restaurant-adjacent presence tied to
+   the brand. A bare "did it find anything" check would have let this
+   through; `_is_restaurant_chain` now runs the result through
+   `tier_for_lookup()` (already treats "Disqualified" as "not a prospect")
+   instead of inventing a second rule for the same thing.
+
+**A real operational gap found live, now handled**: the first attempt to
+run this against all ~150 unique companies hit a genuine Anthropic API
+billing failure (`"Your credit balance is too low"`) partway through and
+**crashed the whole script** — `_is_restaurant_chain` only checked whether
+`ANTHROPIC_API_KEY` was *set*, not whether calls to it actually
+*succeeded*, so a persistent failure (billing, auth) would have retried
+identically for every remaining company before finally dying. Fixed to
+catch the failure once, print one clear message, and short-circuit every
+remaining lookup in that scan run (`_UNAVAILABLE` sentinel) rather than
+paying the latency to fail the same way ~150 more times. **This is still
+blocking full verification** — the account behind the project's
+`ANTHROPIC_API_KEY` needs more credits (Anthropic Console → Plans &
+Billing) before the remaining ~150 companies from that first 401-result
+run can be classified. What's confirmed so far (3 companies were
+already disk-cached from the partial first attempt, before credits ran
+out): **DIG INN** (real fast-casual chain, "Learning & Development
+Associate") and **McDonald's** ("Learning & Development Manager") both
+correctly pass; **Reser's Fine Foods** correctly excluded as
+Disqualified-tier. 2 real, precise signals out of the original 401 — the
+filter is doing its job on every case checked so far, just not yet run to
+completion.
+
 `scripts/handle_hiring_signals.py` deliberately does NOT include the
-Adzuna scan yet — only `scripts/scan_hiring_signals.py`'s read-only dry
-run does — until a real run against real credentials validates the field
-mapping. Treat the first real run as a tuning pass, not a working feature.
+Adzuna scan — only `scripts/scan_hiring_signals.py`'s read-only dry run
+does. `search_jobs()`'s field mapping (`company.display_name`, `created`,
+`redirect_url`, etc.) is now confirmed correct against real payloads, not
+just docs.
 
 ## What's wired vs. not
 

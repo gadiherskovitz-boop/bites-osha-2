@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import date, timedelta
 
@@ -116,23 +117,100 @@ def scan_hiring_signals(window_days: int = 100, today: date | None = None) -> li
     return signals
 
 
-# Adzuna's own `what` query does the L&D/Training/Enablement pre-filter
-# server-side (fewer results to pull), then is_relevant_hiring_posting()
-# still re-checks the title locally - same belt-and-suspenders reasoning as
-# not trusting Workday's fuzzy searchText alone (see ats_client.py).
-ADZUNA_QUERY = '"learning and development" OR "training manager" OR "training coordinator" OR "l&d" OR enablement'
+# Adzuna's `what` does NOT support inline boolean/quoted-OR syntax - a
+# combined `'"learning and development" OR "training manager"'` query
+# silently returned 0 results, confirmed live 2026-08-18 (no error, just
+# nothing - Adzuna's own docs don't call this out). Only `what_phrase`
+# (exact phrase) is real, so OR-of-phrases means one call per phrase,
+# merged and deduped by job id below - see pipeline/adzuna_client.py.
+ADZUNA_PHRASES = ["learning and development", "training manager", "training coordinator", "enablement"]
 
-# Adzuna aggregates across every industry - unlike the ATS-native boards,
-# which only ever contain companies we already picked, nothing here scopes
-# results to restaurants/QSR server-side. This keyword heuristic is the
-# stand-in, checked against title+description+company - **unverified**,
-# same status as the rest of pipeline/adzuna_client.py, since there's no
-# live Adzuna response yet to tune it against. Expect to revisit once real
-# results exist.
-INDUSTRY_KEYWORDS = re.compile(
-    r"\brestaurant\b|\bQSR\b|\bquick.service\b|\bfast.casual\b|\bfranchise\b|\bhospitality\b|\bfood service\b|\bmulti.unit\b",
-    re.I,
-)
+# Real Adzuna US categories (GET /v1/api/jobs/us/categories), confirmed live
+# to surface genuine hits when combined with the phrases above -
+# "Learning & Development Manager" at McDonald's, "Training Manager" at
+# Dunkin', "Restaurant Training Coordinator" at Chick-fil-A - all three
+# already in accounts_seed.py's QSR50 list. Neither category is precise
+# alone (hospitality-catering-jobs also surfaces hotels/casinos/gyms;
+# hr-jobs surfaces every industry with an HR department, e.g. law firms),
+# so is_relevant_hiring_posting() still runs locally afterward, and
+# PERSONAL_TRAINING_PATTERN below catches a real false-positive class this
+# combination specifically surfaced that the ATS-native scan never did.
+ADZUNA_CATEGORIES = ["hospitality-catering-jobs", "hr-jobs"]
+
+# "Personal Training Manager" (fitness gyms - Crunch Fitness, Valley
+# Fitness, The Alaska Club all hit live under hospitality-catering-jobs)
+# contains "training" and passes the seniority-agnostic function check, but
+# is gym/fitness-instruction, not organizational L&D. Not a pattern the
+# ATS-native scan ever surfaced (none of those 7 companies are fitness
+# chains) - specific to casting a wider net via Adzuna. Kept even though
+# _is_restaurant_chain() below also catches most of these (a fitness studio
+# isn't a restaurant chain either) - cheap enough to check first and avoids
+# spending an LLM call on an obvious case.
+PERSONAL_TRAINING_PATTERN = re.compile(r"\bpersonal training\b|\bfitness\b", re.I)
+
+_UNAVAILABLE = "__classifier_unavailable__"  # sentinel key in _is_restaurant_chain's cache dict
+
+
+def _is_restaurant_chain(company_name: str, cache: dict[str, bool]) -> bool:
+    """Adzuna's real categories (hospitality-catering-jobs, hr-jobs) are
+    nowhere near precise enough to mean "restaurant chain" - confirmed live,
+    first real run: hotels/casinos (Marriott, MGM, Wynn), banks, law firms,
+    security firms (GardaWorld), aerospace/defense (Northrop Grumman), and
+    food MANUFACTURERS (Georgia-Pacific, Schwan's) all passed the
+    category+phrase filter. Real signal was ~15 genuine QSR hits out of 401
+    raw results (~4%).
+
+    Per an explicit user decision, this reuses Rung 5's classifier
+    (pipeline/tier_classifier.py:classify_tier, Claude Haiku + web search)
+    rather than a hand-written keyword list - it already asks exactly this
+    question ("does this name resolve to a real restaurant chain?") for
+    site_count tiering, and it's cached permanently per brand on disk, so a
+    cache hit here is a cache hit later too when handle_hiring_signal
+    resolves the same company's tier. `cache` is an in-run memo on top of
+    that disk cache, since a handful of companies (GardaWorld, Four
+    Seasons, Walmart) appeared 3-7 times in the first real run.
+
+    Checks tier_for_lookup() on the result, not just whether classify_tier
+    found anything - a real miss found live: "Reser's Fine Foods, Inc." (a
+    food MANUFACTURER, not a restaurant chain) got found=true with
+    tier_hint="Disqualified" - the model located some real but tiny
+    restaurant-adjacent presence (5 or fewer locations) tied to the brand.
+    tier_for_lookup() already treats "Disqualified" as "not a prospect" -
+    reusing it here instead of a bare found-or-not check keeps that one
+    rule defined in one place.
+
+    Fails CLOSED (excludes) rather than open when the classifier can't run
+    - either no ANTHROPIC_API_KEY, or a real call failure (confirmed live:
+    an exhausted credit balance 400s every call identically) - the opposite
+    of pipeline/site_count.py's Rung 5 gate, and deliberately so: there, a
+    missing key means "fall through to a Tier 3 default," a safe default.
+    Here, the whole point of this function is cutting real noise, so
+    "can't classify" should not silently mean "include everything" - it
+    would just reproduce the 401-result problem this was built to fix.
+
+    A call failure (as opposed to a missing key) is NOT retried per
+    company - `_UNAVAILABLE` short-circuits every remaining lookup in this
+    `cache` once one real call fails, since a billing/auth failure is
+    persistent and would otherwise mean paying the same latency for every
+    company in the scan only to fail identically each time.
+    """
+    if cache.get(_UNAVAILABLE):
+        return False
+    if company_name not in cache:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            cache[company_name] = False
+        else:
+            from pipeline.tier_classifier import classify_tier
+            from pipeline.tiering import tier_for_lookup
+
+            try:
+                result = classify_tier(company_name)
+                cache[company_name] = result is not None and tier_for_lookup(result) is not None
+            except Exception as e:
+                print(f"  (restaurant-chain classifier unavailable, excluding remaining Adzuna results: {e})")
+                cache[_UNAVAILABLE] = True
+                cache[company_name] = False
+    return cache[company_name]
 
 
 def scan_adzuna_hiring_signals(window_days: int = 100, today: date | None = None) -> list[dict]:
@@ -142,25 +220,31 @@ def scan_adzuna_hiring_signals(window_days: int = 100, today: date | None = None
     require knowing the company first. Returns [] with no error if
     ADZUNA_APP_ID/ADZUNA_APP_KEY aren't set (pipeline/adzuna_client.py).
 
-    **Unverified end to end** - the query string, the industry heuristic,
-    and the field mapping are all written against Adzuna's documented API,
-    not confirmed against a real response. Treat the first real run as a
-    tuning pass, the same way Rung 5's LLM classifier or the original
-    Greenhouse/Lever relevance filter needed a real pass before being
-    trusted.
+    Verified live 2026-08-18 once real credentials existed - see the
+    ADZUNA_PHRASES/ADZUNA_CATEGORIES comments above for the two real
+    corrections that first live run produced, and _is_restaurant_chain for
+    the industry-precision fix that same run showed was needed.
     """
     today = today or date.today()
     start = today - timedelta(days=window_days)
 
+    raw_jobs = {}
+    for phrase in ADZUNA_PHRASES:
+        for category in ADZUNA_CATEGORIES:
+            for job in adzuna_search_jobs(phrase, category=category):
+                raw_jobs[job["posting_id"]] = job  # dedupe - the same posting can match multiple phrase/category pairs
+
+    restaurant_chain_cache: dict[str, bool] = {}
     signals = []
-    for job in adzuna_search_jobs(ADZUNA_QUERY):
+    for job in raw_jobs.values():
         if job["posted_date"] and job["posted_date"] < start:
             continue
-        haystack = f"{job['title']} {job.get('description') or ''} {job.get('company_name') or ''}"
-        if not INDUSTRY_KEYWORDS.search(haystack):
+        if PERSONAL_TRAINING_PATTERN.search(job["title"]):
             continue
         relevant, reason = is_relevant_hiring_posting(job["title"])
         if not relevant:
+            continue
+        if not job["company_name"] or not _is_restaurant_chain(job["company_name"], restaurant_chain_cache):
             continue
         signals.append(
             {
