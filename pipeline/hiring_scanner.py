@@ -150,6 +150,20 @@ PERSONAL_TRAINING_PATTERN = re.compile(r"\bpersonal training\b|\bfitness\b", re.
 
 _UNAVAILABLE = "__classifier_unavailable__"  # sentinel key in _is_restaurant_chain's cache dict
 
+# Confirmed-wrong classifications found live, checked before the AI call
+# rather than left to a retry hoping for a different answer:
+# - "Sam's East"/"Sam's West": real Sam's Club/Walmart legal entities. Sam's
+#   Club warehouse stores do sell some prepared food (bakery, food court in
+#   some locations) - same failure shape as the original Marriott miss
+#   (real secondary food service on a company whose primary business isn't
+#   running restaurants).
+# - "Copeland": an HVAC/industrial company (posting "Executive Enablement
+#   Assistant"), not a restaurant chain at all - the classifier's web
+#   search found "Copeland's," a real but UNRELATED Cajun restaurant chain
+#   with a similar name, and matched the wrong company. A name-collision
+#   failure, different shape than the food-service-adjacent cases above.
+KNOWN_NOT_RESTAURANT_CHAINS = {"sam's east", "sam's west", "copeland"}
+
 
 def _is_restaurant_chain(company_name: str, cache: dict[str, bool]) -> bool:
     """Adzuna's real categories (hospitality-catering-jobs, hr-jobs) are
@@ -202,7 +216,9 @@ def _is_restaurant_chain(company_name: str, cache: dict[str, bool]) -> bool:
     if cache.get(_UNAVAILABLE):
         return False
     if company_name not in cache:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        if company_name.lower() in KNOWN_NOT_RESTAURANT_CHAINS:
+            cache[company_name] = False
+        elif not os.environ.get("ANTHROPIC_API_KEY"):
             cache[company_name] = False
         else:
             import anthropic
