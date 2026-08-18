@@ -1,11 +1,70 @@
-# Hiring trigger — Tier 1 personalized email rules (first draft, pending approval)
+# Hiring trigger — Tier 1 personalized email rules
 
 Built 2026-08-18 per explicit request: start from the OSHA rules
 (`docs/task8_email_rules.md`, Task #8) as the template, adapt only what
-genuinely needs to change for the Hiring trigger. **This is a first
-effort awaiting sign-off** — not yet wired into
-`pipeline/signal_handler.py:handle_hiring_signal`, which still reports
-`tier1_first_touch` as not-yet-built until this is approved.
+genuinely needs to change for the Hiring trigger. First-pass draft was
+reviewed and substantially amended by the user; **finalized version is
+below, both `REFERENCE_DRAFT` and `SYSTEM_PROMPT` in
+`pipeline/hiring_personalize.py` now reflect it.** Still not wired into
+`pipeline/signal_handler.py:handle_hiring_signal` (`tier1_first_touch`
+still reports not-yet-built) — that's the remaining step, not a copy
+question.
+
+## What changed in review (first draft → finalized)
+
+The user rewrote the body directly rather than commenting on the first
+pass — real, substantive corrections, not wording polish:
+
+1. **Subject line: short and blunt, not a sentence.** "Saw the L&D opening
+   at {company}" → **"L&D role"**. New explicit rule 3.
+2. **The "what it means" beat needed a real diagnosis, not a vague
+   gesture.** First draft: "a hire like this usually means training is
+   being rebuilt from scratch or has outgrown what's currently holding it
+   together" - abstract, says nothing specific. Replaced with a concrete,
+   correct insight: L&D is rolling out **desktop/computer-centered
+   training to a deskless workforce** - a real format/channel mismatch,
+   not a guess about the company's internal state.
+3. **Failure modes needed to be causally chained, not listed.** First
+   draft flatly listed four symptoms. Finalized version chains two causes
+   (boring/dated content + front-loaded timing) into an explicit
+   either/or effect (low completion, or low retention even when
+   completion isn't the problem) - an argument, not a list. Also restored
+   "(no offence)" after the "boring" line - a small human aside that's in
+   the *original* OSHA reference too and was dropped by mistake in the
+   first Hiring pass.
+4. **A real correction to my design assumption: stakes belong in the
+   email.** I had written an explicit rule forbidding any risk/compliance
+   language, on the theory that a Hiring signal is a growth moment, not a
+   risk moment. The user's rewrite added a stakes beat naming real
+   downstream consequences directly - "workplace injuries, quality
+   suffers, violations rise." **The corrected rule (now rule 4's stakes
+   beat)**: the opening still shouldn't imply hiring for this role means
+   the company is currently failing - that's an assumption we don't get
+   to make. But the real, general consequences of bad frontline training
+   are exactly the kind of concrete "sell the problem" content this copy
+   style is built on, and shouldn't have been excluded. I'd over-corrected
+   in the first pass by conflating "don't accuse this prospect" with
+   "don't name real stakes at all" - those are different things.
+5. **Bites-as-answer reframed around fixing existing training, not
+   equipping a future hire.** First draft: "gives whoever fills this role
+   training crews actually watch." Finalized: "helps turn your existing
+   training into the right format, at the right time, on the right
+   channel" - a cleaner three-part structure, and doesn't lean on an
+   assumption about a specific not-yet-hired person.
+6. **Video reference simplified.** "I had our team put together a short
+   ... video showing how that plays out on the floor" → "I put together a
+   {company}-branded training video example" - more personal (first
+   person, not "our team"), no elaborate justification needed.
+7. **New explicit closing structure: end on a question.** First draft
+   ended on the proof-point sentence with no distinct call-to-action.
+   Finalized version closes with a separate beat that calls back to the
+   hiring signal ("your next hire would love...") and ends on a short,
+   direct question ("Open to seeing more?"). New explicit rule: always end
+   on a question.
+8. **Minor language fix**: "computer-centred" → "computer-centered" (US
+   spelling, matching the US audience) - same category of small fix
+   Task #8's own doc logged (the "helped Unilever reached" → "reach" grammar
+   correction), noted rather than silently changed.
 
 ## What carries over unchanged from the OSHA rules
 
@@ -29,16 +88,18 @@ effort awaiting sign-off** — not yet wired into
 
 ## What changes, and why
 
-**1. The emotional register flips from risk to growth.** This is the one
-real, deliberate change everything else follows from. OSHA's email opens
-on regulatory exposure ("that puts training documentation on record") —
-the prospect is in a moment of *risk*. A Hiring signal means the opposite:
-the company is *investing*, actively building out capability. Framing this
-as a risk/compliance email (or worse, implying "your training is failing,
-that's why you're hiring") would read as tone-deaf and presumptuous about
-something we don't actually know. The rules explicitly forbid implying the
-company is in trouble or behind — the read is "you're building this, here's
-a head start," never "you're behind."
+**1. The opening frames growth, not risk — but the stakes still get named
+honestly.** OSHA's email opens *and stays* in regulatory-exposure territory
+throughout. A Hiring signal starts differently: the company is *investing*,
+actively building capability, and the opening/trigger framing should never
+imply they're currently failing or in trouble just because they're hiring
+— that's an assumption we don't get to make. But (corrected after review,
+see "What changed in review" below) that doesn't mean avoiding real stakes
+altogether: the email still names the genuine downstream consequences of
+bad frontline training (injuries, quality, compliance violations) as the
+concrete "problem" being sold. The distinction that matters is *accusing
+this specific prospect* (never) vs. *naming a real, general consequence*
+(expected, and part of what makes the copy honest rather than vague).
 
 **2. No exclusion-trigger or citation-branching logic needed.** OSHA's
 prompt has real branching complexity: Fat/Cat is excluded upstream, and the
@@ -66,67 +127,71 @@ exactly what shouldn't be legible in the email. Explicit rule 5 forbids it.
 **6. Persona default: same as OSHA — L&D/Enablement.** Matches
 `pipeline/persona_tracks.py:HIRING_TRACKS`' own first-choice track.
 
-## Reference draft (first pass, generic — no real account)
+## Reference draft (finalized, generic — no real account)
+
+The user's own amended copy, genericized back to a `{company}` token and
+"Alex," (matching this section's role as a worked example, not a real
+send) rather than left McDonald's-specific.
 
 ```
-Subject: Saw the L&D opening at {company}
+Subject: L&D role
 
 Hi Alex,
 
 I saw {company} is hiring for a Learning & Development Manager.
 
-That kind of hire usually means training is either being rebuilt from scratch or has outgrown whatever's currently holding it together.
+What makes life so tricky for L&D is they're rolling out computer-centered training to a deskless workforce.
 
-The gap we see most often isn't intent, it's execution: training goes uncompleted, it's front-loaded onto day one and never revisited, and it ships to an inbox frontline staff never open.
+The content is often boring (no offence). And it's usually front-loaded into the first few days. So either completion rate is low, or knowledge retention is even lower.
 
-Bites gives whoever fills this role training crews actually watch, on-brand and built to be revisited on the job, not just assigned once and forgotten.
+The real issue surfaces down the track - workplace injuries, quality suffers, violations rise.
 
-I had our team put together a 90-second {company}-branded video showing what that looks like in practice: INSERT VIDEO HERE
+Bites helps turn your existing training into the right format, at the right time, on the right channel.
 
-We've helped Unilever reach 90%+ training engagement, and teams see 67% faster onboarding - happy to walk through how that applies here.
+I put together a {company}-branded training video example: INSERT VIDEO HERE
+
+We've helped Unilever reach 90%+ training engagement, and teams see 67% faster onboarding.
+
+I'm sure your next hire would love to have a solution like this. Open to seeing more?
 ```
 
-## Real generated output — McDonald's live Hiring signal (2026-08-18)
+## Real generated output — McDonald's live Hiring signal, finalized rules (2026-08-18)
 
-Generated by `scripts/draft_hiring_first_touch.py` against the real
-"Learning & Development Manager" signal pushed to HubSpot today (McDonald's
-being the most recognizable of today's real hits, same flagship-account
-reasoning Chipotle got for OSHA). Contact is an explicit placeholder, same
-honesty pattern as `scripts/draft_first_touch.py` — real contact
-resolution is still Task #4, blocked on Amplemarket. 131 words.
+Regenerated by `scripts/draft_hiring_first_touch.py` against the finalized
+`SYSTEM_PROMPT`/`REFERENCE_DRAFT`, same real "Learning & Development
+Manager" signal pushed to HubSpot today (McDonald's being the most
+recognizable of that day's real hits, same flagship-account reasoning
+Chipotle got for OSHA). Contact is an explicit placeholder, same honesty
+pattern as `scripts/draft_first_touch.py` — real contact resolution is
+still Task #4, blocked on Amplemarket. 131 words.
 
 ```
-Subject: Saw the L&D opening at McDonald's
+Subject: L&D role
 
 Hi [First Name],
 
 I saw McDonald's is hiring for a Learning & Development Manager.
 
-A hire like this usually means training is being rebuilt from scratch or has outgrown what's currently holding it together.
+What makes life so tricky for L&D is rolling out computer-centered training to a deskless workforce.
 
-The gap we see most often isn't intent, it's execution: training goes uncompleted, content feels outdated, timing is off, and it lands in an inbox frontline crews never open.
+The content is often boring (no offence). And it's usually front-loaded into the first few days. So either completion rate is low, or knowledge retention is even lower.
 
-Bites gives whoever steps into this role training crews actually watch, on-brand and ready to go, instead of something built from the ground up.
+The real issue surfaces down the track - workplace injuries, quality suffers, violations rise.
 
-I had our team put together a short McDonald's-branded video showing how that plays out on the floor: INSERT VIDEO HERE
+Bites helps turn your existing training into the right format, at the right time, on the right channel.
 
-We've helped Unilever reach 90%+ training engagement, and teams see 67% faster onboarding - happy to walk through how that could apply here.
+I put together a McDonald's-branded training video example: INSERT VIDEO HERE
+
+We've helped Unilever reach 90%+ training engagement, and teams see 67% faster onboarding.
+
+I'm sure your next hire would love to have a solution like this. Open to seeing more?
 ```
-
-## Open questions for approval
-
-1. Does the growth/investment framing land right, or does it need to be
-   more direct about the pain (closer to OSHA's more pointed tone)?
-2. Is "Learning & Development Manager"-style openings right across the
-   board, or should the opening line adapt wording per seniority (e.g. a
-   Coordinator-level posting reads differently than a Director-level one)?
-3. Proof point choice — lead with Unilever (matches OSHA) or lead with the
-   67% faster onboarding stat (arguably more thematically on-point for a
-   hiring/scaling context)?
 
 ## Files
 
 `pipeline/hiring_personalize.py` (`SYSTEM_PROMPT`, `REFERENCE_DRAFT`,
 `build_user_prompt`, `draft_first_touch`), `scripts/draft_hiring_first_touch.py`
-(driver, hardcoded to the real McDonald's signal). Not yet wired into
-`pipeline/signal_handler.py` — pending approval of this doc.
+(driver, hardcoded to the real McDonald's signal). **Still not wired into**
+`pipeline/signal_handler.py:handle_hiring_signal` — the copy is finalized,
+but the actual auto-draft-and-Note-and-enroll wiring (mirroring
+`_maybe_draft_and_note_first_touch()` for OSHA) hasn't been built yet.
