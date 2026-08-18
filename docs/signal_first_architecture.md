@@ -127,6 +127,17 @@ Sequence enrollment varies by tier and is the one place Fat/Cat differs:
   the contact and signal are still fully visible (object + note + Slack), a
   human decides what happens next.
 
+**Task #7 update (2026-08-18):** "Real HubSpot workflow, triggered by
+`qsr_signal` object creation" (below) is superseded - built instead as a
+direct call from `pipeline/signal_handler.py:handle_signal()` right after it
+creates the `qsr_signal` object, with no separate native HubSpot workflow
+watching for that creation. A workflow trigger would only re-detect an event
+the same function just caused. `docs/task7_workflow_notes.md` has the full
+reasoning plus the real API constraints found along the way (no scopes
+granted yet on this portal's private app; the Sequences API has no
+create-sequence endpoint, so the sequence itself is still human-authored in
+the HubSpot UI, same as before).
+
 ## Hiring trigger
 
 Out of scope for this build beyond the persona-track definition; expected to

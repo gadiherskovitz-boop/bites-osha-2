@@ -26,7 +26,8 @@ def main():
         result = handle_signal(signal)
         print(
             f"[{label}] {signal['establishment_name']} -> company {result['company_id']}, "
-            f"{result['tier']}, sequence_eligible={result['sequence_eligible']}"
+            f"{result['tier']}, sequence_eligible={result['sequence_eligible']}, "
+            f"sequence_enrollment={result['sequence_enrollment']}"
         )
 
 

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 
 from pipeline.accounts_seed import history_is_complete
 from pipeline.brand_history import year_summary
-from pipeline.hubspot_client import create_note, upsert_qsr_signal, upsert_signal_company
+from pipeline.hubspot_client import (
+    create_note,
+    enroll_in_sequence,
+    upsert_qsr_signal,
+    upsert_signal_company,
+)
 from pipeline.osha_client import violation_narrative
 from pipeline.company_names import brand_name
 from pipeline.site_count import lookup_site_count
@@ -14,6 +20,15 @@ from pipeline.tiering import tier_for_lookup
 # Real contact resolution needs Amplemarket (Task #4, not yet unblocked) -
 # this is shown honestly rather than faked. See HANDOFF.md.
 SUGGESTED_CONTACT_PLACEHOLDER = "Pending — contact resolution not yet wired up (Task #4, blocked on Amplemarket)"
+
+# Tier 3 sequence enrollment (Task #7) needs a sequence created once by a
+# human in the HubSpot UI (no public create-sequence endpoint - see
+# docs/task7_workflow_notes.md) plus a connected sender inbox. All three are
+# unset until that setup happens; enrollment is skipped cleanly until then,
+# same pattern as the Rung 5 ANTHROPIC_API_KEY gate.
+TIER3_SEQUENCE_ID = os.environ.get("HUBSPOT_TIER3_SEQUENCE_ID")
+SEQUENCE_SENDER_EMAIL = os.environ.get("HUBSPOT_SENDER_EMAIL")
+SEQUENCE_SENDER_USER_ID = os.environ.get("HUBSPOT_SENDER_USER_ID")
 
 
 def _signal_subtype(signal: dict) -> str:
@@ -160,13 +175,46 @@ def _render_note(lines: list[tuple[str, str, str]]) -> str:
     return "<br>".join(rendered)
 
 
-def handle_signal(signal: dict) -> dict:
+def _maybe_enroll_in_sequence(tier: str | None, sequence_eligible: bool, contact_id: str | None) -> dict:
+    """Tier 3, non-Fat/Cat signals auto-enroll their resolved contact into the
+    Tier 3 call-task sequence - the one behavior Task #7 adds. Tier 1 is
+    deliberately excluded here: its sequence exists but is sent manually by
+    an AE (Task #8), never auto-enrolled.
+
+    No native HubSpot workflow object watches for qsr_signal creation and
+    triggers this separately - this function IS that trigger. A workflow
+    would only re-detect the object creation this same call performed a few
+    lines up; that's redundant orchestration, not a capability gap. See
+    docs/task7_workflow_notes.md for the fuller reasoning and the real API
+    constraints (no public create-sequence endpoint; scopes not yet granted)
+    that also fed this decision.
+
+    Returns a status dict instead of enrolling silently or raising, since
+    every real precondition here - a resolved contact, a configured
+    sequence, a connected sender - is currently unmet and that must stay
+    visible rather than fail quietly.
+    """
+    if tier != "Tier 3" or not sequence_eligible:
+        return {"attempted": False, "reason": "not Tier 3 / not sequence-eligible"}
+    if not contact_id:
+        return {"attempted": False, "reason": "no resolved contact yet (Task #4, blocked on Amplemarket)"}
+    if not (TIER3_SEQUENCE_ID and SEQUENCE_SENDER_EMAIL and SEQUENCE_SENDER_USER_ID):
+        return {"attempted": False, "reason": "Tier 3 sequence not configured (see docs/task7_workflow_notes.md)"}
+
+    enroll_in_sequence(contact_id, TIER3_SEQUENCE_ID, SEQUENCE_SENDER_EMAIL, SEQUENCE_SENDER_USER_ID)
+    return {"attempted": True, "sequence_id": TIER3_SEQUENCE_ID}
+
+
+def handle_signal(signal: dict, contact_id: str | None = None) -> dict:
     """Fires the qsr_signal object + Company Note + Slack alert together for
     one real signal, per docs/signal_first_architecture.md step 5. All three
     fire for every signal, including Fat/Cat - the only Fat/Cat-specific
-    behavior is the returned sequence_eligible flag, which a future Task #7
-    workflow would gate sequence enrollment on (no sequence exists yet to
-    actually enroll into).
+    behavior is the returned sequence_eligible flag, which gates Tier 3
+    sequence enrollment (Task #7, see _maybe_enroll_in_sequence).
+
+    `contact_id` is the resolved contact to enroll if eligible - None until
+    Task #4 (resolve_contact) lands, in which case enrollment is skipped and
+    reported honestly rather than faked.
     """
     lookup = lookup_site_count(signal["establishment_name"])
     tier = tier_for_lookup(lookup)
@@ -212,8 +260,11 @@ def handle_signal(signal: dict) -> dict:
     create_note(company_id, _render_note(lines))
 
     is_fat_cat = subtype == "Fat/Cat"
+    sequence_eligible = not is_fat_cat
+    enrollment = _maybe_enroll_in_sequence(tier, sequence_eligible, contact_id)
     return {
         "company_id": company_id,
         "tier": tier,
-        "sequence_eligible": not is_fat_cat,
+        "sequence_eligible": sequence_eligible,
+        "sequence_enrollment": enrollment,
     }

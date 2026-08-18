@@ -254,6 +254,53 @@ def upsert_qsr_signal(company_id: str, properties: dict):
     return signal
 
 
+def list_sequences(user_id: str):
+    """GET /automation/sequences/2026-03 (NOT .../sequences - that 400s,
+    "sequences" gets parsed as a path-segment sequenceId; confirmed live
+    2026-08-18) - read access only. There is no public endpoint to CREATE a
+    sequence (confirmed against HubSpot's own docs while building Task #7 -
+    sequences are UI-authored, same as email templates, since they carry
+    personalization tokens and a sender identity the API has no model for).
+    Used to look up the id of the Tier 3 call-task sequence a human creates
+    once in the HubSpot UI. `user_id` is a required query param, not
+    optional - a call without it 400s. Needs automation.sequences.read.
+    See docs/task7_workflow_notes.md.
+    """
+    resp = requests.get(
+        f"{BASE_URL}/automation/sequences/2026-03",
+        headers=_headers(),
+        params={"userId": user_id, "limit": 100},
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def enroll_in_sequence(contact_id: str, sequence_id: str, sender_email: str, user_id: str):
+    """POST /automation/sequences/2026-03/enrollments - the one write
+    operation the public Sequences API actually offers (see list_sequences).
+
+    Needs automation.sequences.enrollments.write, plus a HubSpot user
+    (`user_id`) with a connected sending inbox matching `sender_email` -
+    the scope is confirmed live (2026-08-18), the connected-inbox
+    requirement is not yet confirmed. Not called by signal_handler.py until
+    a real contact exists to enroll (Task #4, blocked on Amplemarket) and
+    the sequence/inbox prerequisites are confirmed. See
+    docs/task7_workflow_notes.md.
+    """
+    resp = requests.post(
+        f"{BASE_URL}/automation/sequences/2026-03/enrollments",
+        headers=_headers(),
+        params={"userId": user_id},
+        json={
+            "contactId": contact_id,
+            "sequenceId": sequence_id,
+            "senderEmail": sender_email,
+        },
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def create_note(company_id: str, note_body: str):
     resp = requests.post(
         f"{BASE_URL}/crm/v3/objects/notes",
