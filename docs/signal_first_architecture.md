@@ -140,14 +140,41 @@ the HubSpot UI, same as before).
 
 ## Hiring trigger
 
-**Active build focus as of 2026-08-18.** The OSHA signal path is fully built
-except for Task #4 (`resolve_contact`, blocked on Amplemarket - see
-`HANDOFF.md`); rather than idle waiting on that, the build moved to the
-Hiring trigger, which doesn't depend on it. Persona tracks are already
-defined (`pipeline/persona_tracks.py:HIRING_TRACKS`); everything else below
-is still to be built, following the same steps 2-5 as the OSHA path once
-step 1 exists, with Greenhouse/Lever job-board APIs as its own step-1
-source instead of OSHA data.
+Built 2026-08-18, picked specifically because it doesn't depend on Task #4
+(`resolve_contact`, blocked on Amplemarket - see `HANDOFF.md`). Full detail
+and real findings in `docs/hiring_signal_scope.md` - summary below.
+
+**Step 1 differs from OSHA in a real, structural way**: neither Greenhouse's
+nor Lever's public API offers company discovery, only per-company postings
+for a board token you already know. So step 1 here is "scan a hand-curated
+list of known boards" (`pipeline/hiring_seed.py`, `pipeline/ats_client.py`,
+`pipeline/hiring_scanner.py`), not a global scan the way OSHA's NAICS search
+is. Verified live: of the 28 QSR50/Contenders chains plus ~60 other
+fast-casual/coffee/bakery brands tried, only 4 have a public board at all
+(Sweetgreen, Caribou Coffee - Greenhouse; Blue Bottle Coffee, Insomnia
+Cookies - Lever), all younger/tech-forward chains, none from the large-chain
+list. Growing that seed list is this path's equivalent of expanding Rung 1's
+28-brand list - real, valuable, offline work.
+
+Trigger: an L&D/Training/People-Ops leadership role posted
+(`is_relevant_hiring_posting()` - requires a seniority marker AND a
+function marker together, tuned against a real false positive: "Store
+Manager in Training (MIT)" is a ubiquitous frontline title, not a
+leadership signal, and a naive "training" keyword match would flag it
+constantly).
+
+Steps 2-3 (site_count/tiering) are reused unchanged - confirmed live, no
+code changes needed. Step 5 (push) reuses the `qsr_signal` object's
+pre-existing `Hiring` type and the pre-existing `hiring_signals` Slack
+channel; `pipeline/signal_handler.py:handle_hiring_signal` is a separate
+function from `handle_signal()` rather than a shared branch, since the two
+signal shapes only share the tiering/company-upsert/object/Slack/Note
+steps, not the OSHA-specific ones (franchisee-name collapsing, brand-wide
+history). Persona tracks (`pipeline/persona_tracks.py:HIRING_TRACKS`) are
+defined but not yet wired to a real `resolve_contact` - blocked on the same
+Task #4 dependency as OSHA. The Tier 1 personalized first-touch email
+(the Hiring equivalent of Task #8) is deliberately not built yet - it needs
+its own copy-rules pass, not a reuse of OSHA's citation-framed copy.
 
 ## What this changes from the original plan
 

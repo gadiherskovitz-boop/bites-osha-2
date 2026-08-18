@@ -34,6 +34,13 @@ TIER1_SEQUENCE_ID = os.environ.get("HUBSPOT_TIER1_SEQUENCE_ID")
 SEQUENCE_SENDER_EMAIL = os.environ.get("HUBSPOT_SENDER_EMAIL")
 SEQUENCE_SENDER_USER_ID = os.environ.get("HUBSPOT_SENDER_USER_ID")
 
+# Separate from TIER3_SEQUENCE_ID - that sequence is named "QSR T3 - OSHA
+# Trigger" (see HANDOFF.md), so its copy assumes an OSHA context and isn't
+# right to auto-enroll a Hiring-triggered contact into. A human creates this
+# one the same way they created the OSHA sequences (no create-sequence API -
+# see docs/task7_workflow_notes.md); unset until then, skipped cleanly.
+HIRING_TIER3_SEQUENCE_ID = os.environ.get("HUBSPOT_HIRING_TIER3_SEQUENCE_ID")
+
 
 def _signal_subtype(signal: dict) -> str:
     """The granular type for the qsr_signal record and templates - Complaint/
@@ -315,4 +322,105 @@ def handle_signal(signal: dict, contact: dict | None = None) -> dict:
         "sequence_eligible": sequence_eligible,
         "sequence_enrollment": enrollment,
         "tier1_first_touch": first_touch,
+    }
+
+
+def _build_hiring_lines(signal: dict, tier: str | None) -> list[tuple[str, str, str]]:
+    lines = [
+        ("🏢", "Company", signal["establishment_name"]),
+        ("🚨", "Signal", "Hiring"),
+        ("📅", "Posted", str(signal["posted_date"]) if signal["posted_date"] else "unknown"),
+        ("💼", "Role", signal["job_title"]),
+    ]
+    if signal.get("team"):
+        lines.append(("🧭", "Team", signal["team"]))
+    if signal.get("location"):
+        lines.append(("📍", "Location", signal["location"]))
+    lines.append(("🏷️", "Tier", tier))
+    lines.append(("👤", "Suggested Contact", SUGGESTED_CONTACT_PLACEHOLDER))
+    lines.append(("🔗", "Source", signal["source_url"]))
+    return lines
+
+
+def _maybe_enroll_hiring_tier3(tier: str | None, contact_id: str | None) -> dict:
+    """Hiring's own Tier 3 gate - same shape as _maybe_enroll_in_sequence but
+    against HIRING_TIER3_SEQUENCE_ID, since the OSHA Tier 3 sequence's copy
+    doesn't fit a Hiring trigger. Hiring has no Fat/Cat-equivalent exclusion,
+    so tier is the only gate."""
+    if tier != "Tier 3":
+        return {"attempted": False, "reason": "not Tier 3"}
+    if not contact_id:
+        return {"attempted": False, "reason": "no resolved contact yet (Task #4, blocked on Amplemarket)"}
+    if not (HIRING_TIER3_SEQUENCE_ID and SEQUENCE_SENDER_EMAIL and SEQUENCE_SENDER_USER_ID):
+        return {"attempted": False, "reason": "Hiring Tier 3 sequence not configured (see docs/hiring_signal_scope.md)"}
+
+    enroll_in_sequence(contact_id, HIRING_TIER3_SEQUENCE_ID, SEQUENCE_SENDER_EMAIL, SEQUENCE_SENDER_USER_ID)
+    return {"attempted": True, "sequence_id": HIRING_TIER3_SEQUENCE_ID}
+
+
+def handle_hiring_signal(signal: dict, contact: dict | None = None) -> dict:
+    """Hiring's counterpart to handle_signal() - kept as a separate function
+    rather than branching handle_signal() itself, since the two signal
+    shapes only share the site_count/tiering/company-upsert/qsr_signal/Slack/
+    Note steps, not the OSHA-specific ones (brand collapsing, brand-wide
+    history, violation narrative). See docs/hiring_signal_scope.md.
+
+    Tier 1 personalized first-touch (Task #8's Hiring equivalent) isn't
+    built this session - copy rules need their own design pass the way
+    docs/task8_email_rules.md got for OSHA, not a rushed reuse of OSHA's
+    citation-framed copy. Reported honestly as not-yet-built, same pattern
+    as the contact-resolution gaps above.
+    """
+    # ATS board names come from pipeline/hiring_seed.py's hand-verified
+    # list, already the canonical brand name - unlike OSHA's establishment
+    # strings, there's no franchisee-legal-name noise to collapse.
+    account_name = signal["establishment_name"]
+    lookup = lookup_site_count(account_name)
+    tier = tier_for_lookup(lookup)
+    domain = lookup["domain"] or signal["domain"]
+
+    company = upsert_signal_company(
+        account_name,
+        domain,
+        {
+            "bites_tier": tier,
+            "site_count": lookup["value"],
+            "disqualified": "false",
+        },
+    )
+    company_id = company["id"]
+
+    qsr_signal_properties = {
+        "signal_summary": f"Hiring - {signal['job_title']} - {account_name}",
+        "signal_type": "Hiring",
+        "signal_date": (signal["posted_date"] or date.today()).isoformat(),
+        "source_url": signal["source_url"],
+        "severity": None,
+        "penalty_amount": None,
+        "description": f"{signal['job_title']} posted"
+        + (f" ({signal['team']})" if signal.get("team") else "")
+        + (f", {signal['location']}" if signal.get("location") else ""),
+        # Reuses the OSHA-named source_activity_nr/source_citation_id pair
+        # for idempotent dedup (find_qsr_signal/upsert_qsr_signal, see
+        # pipeline/hubspot_client.py) rather than adding a schema migration
+        # for one new field - "{ats_source}:{posting_id}" is a unique key
+        # the same way an OSHA activity_nr is. Known naming debt, same
+        # precedent as leaving the unused governance_model property alone.
+        "source_activity_nr": f"{signal['ats_source']}:{signal['posting_id']}",
+        "source_citation_id": None,
+    }
+    upsert_qsr_signal(company_id, qsr_signal_properties)
+
+    lines = _build_hiring_lines(signal, tier)
+    post_message(CHANNELS["hiring_signals"], _render_slack(lines))
+    create_note(company_id, _render_note(lines))
+
+    contact_id = contact["id"] if contact else None
+    enrollment = _maybe_enroll_hiring_tier3(tier, contact_id)
+    return {
+        "company_id": company_id,
+        "tier": tier,
+        "sequence_eligible": True,
+        "sequence_enrollment": enrollment,
+        "tier1_first_touch": {"attempted": False, "reason": "Hiring Tier 1 copy rules not yet designed"},
     }
