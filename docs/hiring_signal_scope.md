@@ -1,161 +1,221 @@
-# Hiring signal (Greenhouse/Lever) — scope and real findings
+# Hiring signal (Greenhouse/Lever/Workday) — scope and real findings
 
 Built 2026-08-18, the session's pivot target once the OSHA path stalled on
-Task #4/Amplemarket (see `HANDOFF.md`). Same discipline as the OSHA build:
-every claim below was checked live, not assumed. Mirrors
-`docs/osha_ords_imis_notes.md`'s role for this signal source.
+Task #4/Amplemarket (see `HANDOFF.md`). **Planned before building** — a
+round of explicit questions was worked through with the user before any
+code was written; the corrections that round produced are documented below
+alongside the live findings, since both shaped the final design equally.
+Same discipline as the OSHA build throughout: every claim below was
+checked live, not assumed.
 
 ## The core architectural difference from OSHA
 
 OSHA's `industry.search` is a real global scan: give it a NAICS code and a
-date range and it returns every matching establishment in the country, known
-or not. **Neither Greenhouse's nor Lever's public API offers anything
-equivalent.** Both only serve postings for a company whose board
-token/slug you already know (`boards-api.greenhouse.io/v1/boards/{token}/jobs`,
-`api.lever.co/v0/postings/{slug}`) — there is no company-search or directory
-endpoint on either public API. This means the Hiring path can't be
-"signal-first" in the same sense the OSHA path is; it's closer to
-"signal-first among a hand-curated set of accounts known to be on one of
-these two ATSs." `pipeline/hiring_seed.py` is that curated set, and growing
-it is the single highest-leverage next step on this thread — the exact
-role `accounts_seed.py`'s 28-brand list plays for Rung 1 of the site_count
-waterfall.
+date range and it returns every matching establishment in the country,
+known or not. **None of Greenhouse, Lever, or Workday's public APIs offer
+anything equivalent.** All three only serve postings for a company whose
+board token (or, for Workday, tenant/shard/site) you already know — there
+is no company-search or directory endpoint on any of them. This means the
+Hiring path can't be "signal-first" in the same sense the OSHA path is;
+it's closer to "signal-first among a hand-curated set of known accounts."
+`pipeline/hiring_seed.py` is that curated set. **Adzuna** (see below) is
+the one real candidate found for a genuine keyword-based industry scan
+that doesn't require knowing the company first — added specifically to
+close this gap, per an explicit 2026-08-18 planning decision, though it
+remains unverified pending account credentials only the user can create.
 
 ## What's actually out there, verified live
 
-Tried ~90 slug guesses 2026-08-18: every brand in `accounts_seed.py`'s
-QSR50/Contenders list (all 28, tried on both APIs) plus ~60 younger
-fast-casual/coffee/bakery chains, with common slug variants (plain,
-hyphenated, `-coffee`/`-inc` suffixes). Real result: **4 hits, 0 from the
-large-chain list.**
+Tried ~90 slug guesses against Greenhouse/Lever: every brand in
+`accounts_seed.py`'s QSR50/Contenders list (all 28) plus ~60 younger
+fast-casual/coffee/bakery chains, with common slug variants. Result: **4
+hits, 0 from the large-chain list** — Sweetgreen, Caribou Coffee
+(Greenhouse), Blue Bottle Coffee, Insomnia Cookies (Lever). Every large
+legacy chain tested — McDonald's, Starbucks, Chick-fil-A, Wendy's,
+Domino's, Chipotle, Cava, Dutch Bros, and more — 404s on both. Large QSR
+operators overwhelmingly run enterprise ATS (Workday, iCIMS, Taleo) with
+no public API; Greenhouse/Lever skew toward companies that grew up on
+modern SaaS hiring tooling.
 
-| Brand | ATS | Board token |
-|---|---|---|
-| Sweetgreen | Greenhouse | `sweetgreen` |
-| Caribou Coffee | Greenhouse | `caribou` |
-| Blue Bottle Coffee | Lever | `bluebottlecoffee` |
-| Insomnia Cookies | Lever | `insomniacookies` |
+**Workday closes that gap.** Confirmed live via web search + a real,
+unauthenticated JSON API (`{tenant}.wd{shard}.myworkdayjobs.com/wday/cxs/
+{tenant}/{site}/jobs`, POST — the same endpoint the site's own search box
+calls): **Chipotle** (216 open corporate reqs), **Whataburger** (4,290,
+almost all frontline), and **Shake Shack** (565) all have real, live
+Workday boards. Per an explicit 2026-08-18 scoping decision, this list
+stops at 7 companies (4 Greenhouse/Lever + 3 Workday) rather than hunting
+further tenants — enough to prove the pattern for a demo, not a
+requirement to maximize coverage. Growing it further (Greenhouse/Lever
+slug guesses, or web-searching more of the 28-brand list for Workday
+tenants) is the natural next step, not done now.
 
-Every large legacy chain tested — McDonald's, Starbucks, Chick-fil-A, Taco
-Bell, Wendy's, Dunkin', Domino's, Chipotle, Popeyes, Panera, Sonic, Jersey
-Mike's, Firehouse Subs, Cinnabon, Portillo's, Cava, Dutch Bros, Wingstop,
-Shake Shack, Bojangles, Culver's, Raising Cane's, Whataburger, and more —
-404s on both APIs. This isn't a sampling gap, it's a real pattern: large QSR
-operators overwhelmingly run enterprise ATS (Workday, iCIMS, Taleo, SAP
-SuccessFactors) with no public read API, while Greenhouse/Lever skew toward
-companies that grew up on modern SaaS hiring tooling — younger, often
-VC-backed, tech-forward brands. All 4 hits fit that profile. None of the 4
-are in the QSR50 Rung-1 seed list either, so their tier comes from Rung 4
-(Wikidata) or Rung 5 (LLM + web search) or the Tier 3 default — no changes
-needed to `pipeline/site_count.py`, confirmed live: Sweetgreen resolves via
-Rung 5 to Tier 1 (887 sites, `web_high` confidence).
+Chipotle's name/domain (`Chipotle Mexican Grill` / `chipotle.com`) matches
+`accounts_seed.py`'s QSR50 entry exactly, so a real Hiring signal there
+resolves via Rung 1 (real 3,938-site count) and converges onto the same
+Company record the OSHA path already created (id `443765558499`) rather
+than creating a duplicate.
 
-**Implication for the demo**: the Hiring path's coverage is real but
-narrow. Worth saying explicitly when presenting rather than letting the
-OSHA path's "real global scan" framing bleed over — this is closer to a
-target-account watchlist than a census.
+## Two real, undocumented Workday API quirks found live
 
-## The relevance filter — a real false positive worth knowing about
+1. **`limit` caps at 20** — anything higher 400s with an opaque
+   `errorCode: HTTP_400` and no message. Not documented anywhere found;
+   discovered by trial (20 works, 50/99/100 all fail). `WORKDAY_PAGE_SIZE`
+   in `pipeline/ats_client.py` is set to 20 accordingly.
+2. **`total` is only reliable on the first page.** Every page after
+   offset=0 reports `total: 0` in the response, even though it still
+   returns real `jobPostings` data. A naive pagination loop (stop when
+   `offset >= total`) breaks after the second page and silently truncates
+   the scan — caught by cross-checking a raw job count against the
+   paginated result (Chipotle's real total is 216; the naive loop version
+   returned 40 before the fix). `workday_jobs()` now reads `total` once,
+   from the first page only, and uses that fixed value as the loop bound.
 
-`pipeline/hiring_scanner.py:is_relevant_hiring_posting()` requires a
-seniority marker (Director, Head of, VP, Vice President, Chief, CLO, CHRO)
-**and** a function marker (Learning, Training, L&D, People, Human
-Resources, HR, Talent, Enablement, Organizational Development) together,
-deliberately matching `pipeline/persona_tracks.py`'s own bar for
-"leadership" (vp/director/head/c-suite — not "senior" ICs, not bare
-"Manager").
+Both are exactly the kind of "the API doesn't behave the way its own
+homepage response implies" finding the OSHA build hit repeatedly
+(`docs/osha_ords_imis_notes.md`'s swapped date fields, the no-`<tbody>`
+quirk) — worth trusting nothing about pagination behavior without a live
+cross-check, on any new source.
 
-That bar exists because of a real hit found live scanning Sweetgreen's and
-Insomnia Cookies' actual boards:
+## Scoping large Workday boards: per-tenant `jobFamilyGroup` facets
 
-- **"Store Manager in Training (MIT)"**, **"Leader in Training"** — a
-  ubiquitous entry-level frontline title pattern across QSR hiring (MIT =
-  "Manager in Training"). A naive substring match on "training" alone would
-  flag these on nearly every QSR company's board, constantly. Correctly
-  excluded — no seniority marker.
-- **"Manager, Talent Acquisition"**, **"Sr. People Business Partner
-  (HRBP)"** — real People-function roles, genuinely relevant-adjacent, but
-  IC/manager-level, not leadership. Correctly excluded for the same reason
-  `persona_tracks.py` doesn't treat a bare "Manager" title as a leadership
-  contact either.
-- **"Senior Field HRBP" tagged under Lever's `categories.team: "People
-  Team"`** — this is the case that motivated checking the team field at
-  all (Greenhouse has no equivalent field), but "Senior" isn't a seniority
-  marker here by design, so it's still excluded. Function-only matches
-  never fire alone.
+Workday's response includes real facet data (`jobFamilyGroup`, among
+others) that can scope a query server-side via `appliedFacets`. Confirmed
+live: Whataburger's facets include a "Human Resources" bucket (3 jobs) vs.
+"Restaurant Operations" (4,257, the frontline noise) — applying the HR
+facet id cuts the query from 4,290 total to 3, verified to return real,
+correct titles ("HRIS Specialist," "Regional Field Human Resources
+Manager," "Field Talent Acquisition Partner"). **Facet ids are opaque and
+tenant-specific** — Chipotle uses 3-letter codes (`HRA`, `OPS`, `MKT`...),
+Whataburger spells categories out, Shake Shack has no HR-shaped facet at
+all (its facets are State/City/JobCategory, the latter all frontline
+roles: Team Members, Shack Management, Shift Managers...). There's no
+universal id to guess or reuse across companies, so `job_family_group_id`
+is only set in `pipeline/hiring_seed.py` where already found (Whataburger
+only) — Chipotle (216 total) and Shake Shack (565 total) are small enough
+to paginate in full instead. `WORKDAY_MAX_JOBS` caps the pull either way,
+so a future large, unfaceted tenant fails safe rather than pulling
+unboundedly.
 
-Verified against 16 synthetic cases (8 true positives spanning the title
-patterns above, 8 true negatives including all three real ones above) — all
-16 passed. Live scan against the 4 real boards on 2026-08-18 found 0 current
-matches — a real result, not a bug: leadership L&D/HR reqs are rare and
-none of the 4 companies happened to have one open that day. Same
-"filter verified correct, this window just came back empty" pattern the
-OSHA Violations scanner hit once already.
+## The relevance filter — corrected after a real planning catch
 
-**Known limitation, not solved**: Lever's `team` field is coarse. A generic
-"Regional Director" title tagged under a "People Team" department would
-pass the filter even if the specific role is more operational than
-strategic — no live example of this hit yet, flagged rather than
-over-engineered around.
+**First version (built, then corrected before any real push happened)**
+required a seniority marker (Director/VP/Head/Chief) *and* a function
+marker (Learning/Training/L&D/People/HR/Talent/Enablement) together,
+mirroring `persona_tracks.py`'s bar for who to *contact*. The user caught
+a real design mistake in this during planning: **the trigger and the
+contact target are two different questions.** Any L&D/Training/Enablement
+posting is a real signal regardless of seniority — a Coordinator-level
+Training hire is just as real a signal as a Director-level one, arguably a
+*stronger* volume signal since leadership openings are rare. Seniority
+belongs entirely downstream, at contact resolution
+(`persona_tracks.py:HIRING_TRACKS` already correctly encodes Director/VP/
+Head/Chief as *who to contact*, separate from what counts as a signal).
+
+**Corrected filter** (`pipeline/hiring_scanner.py:is_relevant_hiring_posting`):
+any seniority, function scope narrowed to specifically L&D/Training/
+Enablement (dropped the broader People/HR/Talent keywords — per the same
+correction, those aren't the trigger described). Real postings found live
+that correctly do NOT qualify under this narrower scope: "Manager, Talent
+Acquisition" (Sweetgreen), "Sr. People Business Partner (HRBP)" (Insomnia
+Cookies), "Field HR Business Partner" (Chipotle), "Regional Field Human
+Resources Manager" (Whataburger) — all genuine People-function activity,
+but recruiting/generalist HR, not L&D/Training/Enablement specifically.
+
+The one thing the old seniority bar was incidentally doing right — excluding
+"Store Manager in Training (MIT)"/"Leader in Training," a ubiquitous
+entry-level frontline title pattern across QSR chains (19 real instances
+found on Insomnia Cookies' board alone) that isn't an L&D-team hire at all
+— is now handled directly via an explicit `TRAINEE_PATTERN` exclusion
+(`\bin training\b|\btrainee\b`), since that's a different problem (a title
+pattern, not a seniority signal) and needed solving on its own regardless
+of the seniority correction.
+
+Verified against 21 synthetic cases (9 true positives now spanning every
+seniority level, 12 true negatives including all the real non-qualifying
+titles above) — all 21 passed. **Live cross-check across all 7 real
+boards' current full listings** (not just the filtered result): the only
+raw title matches on learn/train/l&d/enable across all ~2,000 combined
+postings are "Manager/Leader in Training" frontline variants — correctly
+excluded — confirming the 0-signal live result is real, not a filter bug
+silently missing something.
+
+## Adzuna — the industry-wide scan, unverified
+
+Per the planning round: Adzuna is a real, documented, free-tier (1,000
+calls/month) job aggregator with a genuine keyword-search API — the one
+candidate found that doesn't require already knowing the company (unlike
+all three ATS-native sources). Indeed's Publisher API died in 2023
+(replacement is an NDA-gated six-figure enterprise deal); LinkedIn has no
+public Jobs API and its ToS prohibits scraping — both ruled out.
+
+**Not tested live** — it needs a free developer account
+(`developer.adzuna.com`), and creating third-party accounts isn't
+something this pipeline does unilaterally; the user needs to sign up and
+drop `ADZUNA_APP_ID`/`ADZUNA_APP_KEY` into `.env` (see `.env.example`).
+`pipeline/adzuna_client.py` and `pipeline/hiring_scanner.py:
+scan_adzuna_hiring_signals` are written against Adzuna's documented API
+shape, gated to skip cleanly when the keys aren't set (same pattern as
+`ANTHROPIC_API_KEY`), and treated as a **discovery** layer — feeding new
+companies into consideration, not replacing the ATS-native scan, which
+gives cleaner, more complete data once a company is known.
+
+Two real, acknowledged gaps in the Adzuna integration specifically, since
+they can't be resolved without a live response to tune against:
+- **Industry scoping**: Adzuna has no confirmed restaurant/QSR category
+  slug, so `INDUSTRY_KEYWORDS` (a keyword check against
+  title+description+company for "restaurant," "QSR," "franchise,"
+  "hospitality," etc.) is a first-pass heuristic, not a verified filter.
+- **Field mapping**: response shapes (`company.display_name`, `created`,
+  `redirect_url`, etc.) are per Adzuna's public docs, not confirmed
+  against a real payload.
+`scripts/handle_hiring_signals.py` deliberately does NOT include the
+Adzuna scan yet — only `scripts/scan_hiring_signals.py`'s read-only dry
+run does — until a real run against real credentials validates the field
+mapping. Treat the first real run as a tuning pass, not a working feature.
 
 ## What's wired vs. not
 
 Mirrors the OSHA path's steps 2/3/5 (`docs/signal_first_architecture.md`),
 skipping the OSHA-specific pieces (franchisee-name collapsing, brand-wide
-history) that don't apply — ATS board names are already canonical, sourced
-from the hand-verified seed list, not noisy establishment strings.
+history) that don't apply — ATS board names are already canonical.
 
-- **Scan** (`pipeline/hiring_scanner.py:scan_hiring_signals`) — done, live
-  against real boards.
+- **Scan** — done, live against 7 real boards across 3 ATSs.
+  `pipeline/ats_client.py`, `pipeline/hiring_scanner.py`,
+  `pipeline/hiring_seed.py`.
+- **Discovery (Adzuna)** — built, gated, unverified pending user-created
+  credentials. `pipeline/adzuna_client.py`.
 - **Tier** — reused as-is (`pipeline/site_count.py`, `pipeline/tiering.py`),
   confirmed no changes needed.
 - **Push** (`pipeline/signal_handler.py:handle_hiring_signal`) — done:
-  `qsr_signal` object (already has a `Hiring` option on `signal_type`,
-  confirmed via `scripts/setup_qsr_signal_schema.py`), Company Note, and
-  the `hiring_signals` Slack channel (pre-existing, unchanged) all fire
-  together, matching the OSHA path's "all three, every trigger" rule.
-  Verified end-to-end with a mocked HubSpot/Slack layer (real code path,
-  fake I/O) rather than pushing a fabricated posting into the live
-  portal — no real relevant posting existed to push at build time (see
-  "0 current matches" above), and inventing one would misrepresent a real
-  record. `scripts/handle_hiring_signals.py` is ready to run for real the
-  moment a real qualifying posting appears; `scripts/scan_hiring_signals.py`
-  is a read-only dry run for checking in the meantime.
-- **`source_activity_nr`/`source_citation_id`** — reused rather than
-  migrating the schema for one new field: a Hiring signal's dedup key is
-  `"{ats_source}:{posting_id}"` (e.g. `"greenhouse:8106821"`) in
-  `source_activity_nr`, `source_citation_id` left null. Same idempotent
-  upsert path as OSHA (`pipeline/hubspot_client.py:find_qsr_signal`/
-  `upsert_qsr_signal`), no code changes needed there. Known naming debt,
-  same precedent as leaving the unused `governance_model` property alone
-  rather than a mid-build migration.
-- **Sequence enrollment** — Tier 3 only, gated behind a new
-  `HUBSPOT_HIRING_TIER3_SEQUENCE_ID` env var, deliberately separate from
-  `HUBSPOT_TIER3_SEQUENCE_ID` (that sequence is literally named "QSR T3 -
-  OSHA Trigger," wrong copy context for a Hiring-triggered contact). Unset
-  until a human creates that sequence in the HubSpot UI, same as the OSHA
-  Tier 3/Tier 1 sequences were — skipped cleanly and reported, not faked.
-  No Fat/Cat-equivalent exclusion exists for Hiring, so tier is the only
-  gate.
-- **Contact resolution** — same Task #4/Amplemarket blocker as OSHA, per
-  `HANDOFF.md`. `handle_hiring_signal(signal, contact=None)` takes the same
-  `{"id", "name", "title"}` shape once it lands.
-- **Tier 1 personalized first-touch (Task #8's Hiring equivalent)** — not
-  built this session. `docs/task8_email_rules.md`'s copy rules are framed
-  around a cited OSHA standard/inspection; a Hiring trigger needs its own
-  rules pass (the natural angle: the account is actively building out
-  L&D/People-Ops capability, which is a different opening than "we saw an
-  OSHA citation"), not a rushed reuse. `handle_hiring_signal()` reports this
-  honestly (`{"attempted": False, "reason": "Hiring Tier 1 copy rules not
-  yet designed"}`) rather than faking it.
+  `qsr_signal` object (pre-existing `Hiring` type), Company Note, and the
+  `hiring_signals` Slack channel all fire together. Verified end-to-end
+  with a mocked HubSpot/Slack layer (real code path, fake I/O) rather than
+  pushing a fabricated posting into the live portal — no real qualifying
+  posting existed to push at build time.
+- **`source_activity_nr`/`source_citation_id`** — reused rather than a
+  schema migration: a Hiring signal's dedup key is
+  `"{ats_source}:{posting_id}"` (e.g. `"workday:JR-2025-00101221"`) in
+  `source_activity_nr`, `source_citation_id` left null.
+- **Sequence enrollment** — Tier 3 only, gated behind
+  `HUBSPOT_HIRING_TIER3_SEQUENCE_ID`, deliberately separate from
+  `HUBSPOT_TIER3_SEQUENCE_ID` (that one is named "QSR T3 - OSHA Trigger,"
+  wrong copy context). Unset until a human creates that sequence in the
+  HubSpot UI. No Fat/Cat-equivalent exclusion exists for Hiring, so tier is
+  the only gate.
+- **Contact resolution** — same Task #4/Amplemarket blocker as OSHA.
+  Confirmed with the user: company-level enrichment (name → domain/
+  firmographics) and contact-level enrichment are two separate stages,
+  mirroring Clay/Amplemarket's own Company-table/People-table split — the
+  Hiring path already has a clean canonical name for every ATS-native
+  signal (unlike OSHA's noisy establishment strings), so the company-level
+  stage should be easier here, not harder. Noted for when Task #4 unblocks;
+  doesn't change anything built now.
+- **Tier 1 personalized first-touch** — not built this session, same as
+  before. Needs its own copy-rules pass.
 
 ## GTM motion — Slack/Note template
 
-Real template that shipped (`pipeline/signal_handler.py:_build_hiring_lines`),
-adapted from the original plan's sketch (see the plan file's superseded
-"Hiring" block) the same way the OSHA template diverged from its own
-pre-build sketch — added Team/Location fields since Lever's `categories`
-carry real, useful context Greenhouse's response doesn't:
+Unchanged from the first pass (`pipeline/signal_handler.py:_build_hiring_lines`):
 
 ```
 🏢 Company: <name>
@@ -171,8 +231,10 @@ carry real, useful context Greenhouse's response doesn't:
 
 ## Files
 
-`pipeline/ats_client.py` (Greenhouse + Lever HTTP), `pipeline/hiring_seed.py`
-(the 4-board seed list), `pipeline/hiring_scanner.py` (scan +
-relevance filter), `pipeline/signal_handler.py:handle_hiring_signal` (push),
-`scripts/scan_hiring_signals.py` (dry run), `scripts/handle_hiring_signals.py`
-(live push, same `DEFAULT_LIMIT` safety pattern as `scripts/handle_signals.py`).
+`pipeline/ats_client.py` (Greenhouse + Lever + Workday HTTP),
+`pipeline/adzuna_client.py` (Adzuna, unverified), `pipeline/hiring_seed.py`
+(the 7-board seed list), `pipeline/hiring_scanner.py` (scan + relevance
+filter + Adzuna discovery), `pipeline/signal_handler.py:handle_hiring_signal`
+(push), `scripts/scan_hiring_signals.py` (dry run, both sources),
+`scripts/handle_hiring_signals.py` (live push, ATS-native only, same
+`DEFAULT_LIMIT` safety pattern as `scripts/handle_signals.py`).
