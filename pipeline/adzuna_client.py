@@ -49,11 +49,18 @@ def _parse_date(text: str | None) -> date | None:
 
 
 def search_jobs(
-    what_phrase: str, category: str | None = None, country: str = "us", results_per_page: int = 50, max_pages: int = 2
+    what_phrase: str, category: str | None = None, country: str = "us", results_per_page: int = 50, max_pages: int = 20
 ) -> list[dict]:
     """Exact-phrase job search, optionally scoped to an Adzuna category
     (e.g. `hospitality-catering-jobs`, `hr-jobs`). Not scoped to any known
     company - Adzuna aggregates postings across many source boards.
+
+    Loops until Adzuna's own `count` field (total real results for this
+    query) says every result has been fetched, or max_pages is hit as a
+    sanity bound - previously stopped after exactly 2 pages (100 results)
+    regardless of `count`, silently truncating any phrase/category
+    combination with more real hits than that, the same failure shape the
+    Workday `total`-only-on-page-1 bug (pipeline/ats_client.py) produced.
 
     Returns [] immediately if ADZUNA_APP_ID/ADZUNA_APP_KEY aren't set.
     """
@@ -61,6 +68,7 @@ def search_jobs(
         return []
 
     jobs = []
+    total_count = None
     for page in range(1, max_pages + 1):
         params = {
             "app_id": APP_ID,
@@ -74,6 +82,7 @@ def search_jobs(
         resp = requests.get(f"{BASE_URL}/{country}/search/{page}", params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
+        total_count = data.get("count", total_count)
         results = data.get("results", [])
         if not results:
             break
@@ -91,4 +100,6 @@ def search_jobs(
                     "source": "adzuna",
                 }
             )
+        if total_count is not None and len(jobs) >= total_count:
+            break
     return jobs

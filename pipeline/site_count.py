@@ -174,6 +174,18 @@ def _rung5_llm_lookup(establishment_name: str) -> dict | None:
     return classify_tier(establishment_name)
 
 
+# In-run memo on top of Rung 5's own permanent on-disk cache - keyed on the
+# same brand-collapsed, punctuation-stripped string _rung4_wikidata_lookup
+# already normalizes establishment names to, so franchisee-name variants of
+# the same brand ('Ayvaz Pizza Llc Dba Pizza Hut', 'Wendy'S Salt Lake City
+# Llc') share one entry. Without this, a scan/handler run that sees the same
+# brand across multiple signals (common - several real brands in this
+# portal have 2-3 signals in one window) re-pays Rung 4's live Wikidata
+# call, and potentially Rung 5's paid Claude+web-search call, once per
+# signal instead of once per brand.
+_LOOKUP_CACHE: dict[str, dict] = {}
+
+
 def lookup_site_count(establishment_name: str) -> dict:
     """The site_count waterfall: Rung 1 (QSR50/Contenders, free/instant) ->
     Rung 4 (Wikidata, free/fast) -> Rung 5 (LLM + web search, paid/slow) ->
@@ -190,7 +202,11 @@ def lookup_site_count(establishment_name: str) -> dict:
     Rung 5 is skipped when no ANTHROPIC_API_KEY is configured, so the
     pipeline still runs (degrading to the Tier 3 default) without one.
     """
-    return (
+    key = _normalize(establishment_name)
+    if key in _LOOKUP_CACHE:
+        return _LOOKUP_CACHE[key]
+
+    result = (
         _rung1_lookup(establishment_name)
         or _rung4_wikidata_lookup(establishment_name)
         or _rung5_llm_lookup(establishment_name)
@@ -204,3 +220,5 @@ def lookup_site_count(establishment_name: str) -> dict:
             "domain": None,
         }
     )
+    _LOOKUP_CACHE[key] = result
+    return result

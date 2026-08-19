@@ -165,7 +165,7 @@ _UNAVAILABLE = "__classifier_unavailable__"  # sentinel key in _is_restaurant_ch
 KNOWN_NOT_RESTAURANT_CHAINS = {"sam's east", "sam's west", "copeland"}
 
 
-def _is_restaurant_chain(company_name: str, cache: dict[str, bool]) -> bool:
+def _is_restaurant_chain(company_name: str, cache: dict[str, dict]) -> bool:
     """Adzuna's real categories (hospitality-catering-jobs, hr-jobs) are
     nowhere near precise enough to mean "restaurant chain" - confirmed live,
     first real run: hotels/casinos (Marriott, MGM, Wynn), banks, law firms,
@@ -174,8 +174,8 @@ def _is_restaurant_chain(company_name: str, cache: dict[str, bool]) -> bool:
     category+phrase filter. Real signal was ~15 genuine QSR hits out of 401
     raw results (~4%).
 
-    Calls pipeline/hiring_industry_classifier.py:is_restaurant_chain - a
-    small, dedicated classifier built specifically for this question,
+    Calls pipeline/hiring_industry_classifier.py:classify_restaurant_chain -
+    a small, dedicated classifier built specifically for this question,
     deliberately NOT pipeline/tier_classifier.py's classify_tier (Rung 5 of
     the OSHA path's site_count waterfall). classify_tier's prompt
     presupposes the input already IS a restaurant chain (correct for OSHA,
@@ -187,9 +187,11 @@ def _is_restaurant_chain(company_name: str, cache: dict[str, bool]) -> bool:
     already-verified, presentation-critical OSHA infrastructure to solve a
     problem that's specific to this Adzuna layer - not worth that risk for
     a small, separable question. `cache` is an in-run memo on top of
-    is_restaurant_chain's own permanent disk cache, since a handful of
-    companies (GardaWorld, Four Seasons, Walmart) appeared 3-7 times in the
-    first real run.
+    classify_restaurant_chain's own permanent disk cache, since a handful
+    of companies (GardaWorld, Four Seasons, Walmart) appeared 3-7 times in
+    the first real run. `cache` now stores the classifier's full result
+    dict (not just the bool), so the resolved brand name is also available
+    afterward via _resolved_brand_name() - see its docstring.
 
     Fails CLOSED (excludes) rather than open when the classifier can't run
     - either no ANTHROPIC_API_KEY, or a real call failure (confirmed live:
@@ -217,24 +219,36 @@ def _is_restaurant_chain(company_name: str, cache: dict[str, bool]) -> bool:
         return False
     if company_name not in cache:
         if company_name.lower() in KNOWN_NOT_RESTAURANT_CHAINS:
-            cache[company_name] = False
+            cache[company_name] = {"is_restaurant_chain": False, "resolved_brand": None}
         elif not os.environ.get("ANTHROPIC_API_KEY"):
-            cache[company_name] = False
+            cache[company_name] = {"is_restaurant_chain": False, "resolved_brand": None}
         else:
             import anthropic
 
-            from pipeline.hiring_industry_classifier import is_restaurant_chain
+            from pipeline.hiring_industry_classifier import classify_restaurant_chain
 
             try:
-                cache[company_name] = is_restaurant_chain(company_name)
+                cache[company_name] = classify_restaurant_chain(company_name)
             except anthropic.APIStatusError as e:
                 print(f"  (restaurant-chain classifier unavailable, excluding remaining Adzuna results: {e})")
                 cache[_UNAVAILABLE] = True
-                cache[company_name] = False
+                cache[company_name] = {"is_restaurant_chain": False, "resolved_brand": None}
             except Exception as e:
                 print(f"  (restaurant-chain classifier failed for {company_name!r}, excluding just this one: {e})")
-                cache[company_name] = False
-    return cache[company_name]
+                cache[company_name] = {"is_restaurant_chain": False, "resolved_brand": None}
+    return cache[company_name]["is_restaurant_chain"]
+
+
+def _resolved_brand_name(company_name: str, cache: dict[str, dict]) -> str:
+    """The classifier's web-grounded canonical brand name when it found one -
+    collapses a franchise-location-suffixed Adzuna employer name (e.g.
+    "Steak 'n Shake Edwardsville") down to its real brand ("Steak 'n
+    Shake"), which company_names.py's brand_name() alone can't do (see
+    _is_restaurant_chain's docstring). Falls back to brand_name(company_name)
+    when the classifier didn't resolve one. Only meaningful after
+    _is_restaurant_chain() has populated `cache` for this company_name."""
+    resolved = cache.get(company_name, {}).get("resolved_brand")
+    return resolved or brand_name(company_name)
 
 
 def scan_adzuna_hiring_signals(window_days: int = 100, today: date | None = None) -> list[dict]:
@@ -273,7 +287,9 @@ def scan_adzuna_hiring_signals(window_days: int = 100, today: date | None = None
         signals.append(
             {
                 "signal_type": "Hiring",
-                "establishment_name": brand_name(job["company_name"]) if job["company_name"] else "Unknown",
+                "establishment_name": _resolved_brand_name(job["company_name"], restaurant_chain_cache)
+                if job["company_name"]
+                else "Unknown",
                 "domain": None,  # Adzuna doesn't carry a domain - company enrichment resolves this later
                 "job_title": job["title"],
                 "team": None,

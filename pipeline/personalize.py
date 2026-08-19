@@ -10,6 +10,8 @@ is measured against).
 """
 from __future__ import annotations
 
+from pipeline.llm_utils import FIRST_TOUCH_SCHEMA, call_json_schema
+
 # Durable Bites facts, not scoped to any one account or assignment - reused
 # verbatim from Assignment 1.
 FRONTLINE_TRAINING_FAILURE_MODES = [
@@ -153,33 +155,6 @@ def draft_first_touch(signal: dict, account_name: str, contact: dict) -> dict:
     if signal.get("insp_subtype") == "Fat/Cat":
         raise ValueError("draft_first_touch() must never be called on a Fat/Cat signal")
 
-    import anthropic
-
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        system=SYSTEM_PROMPT,
-        output_config={
-            "format": {
-                "type": "json_schema",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "subject": {"type": "string"},
-                        "body": {"type": "string"},
-                    },
-                    "required": ["subject", "body"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        messages=[{"role": "user", "content": build_user_prompt(signal, account_name, contact)}],
+    return call_json_schema(
+        MODEL, SYSTEM_PROMPT, build_user_prompt(signal, account_name, contact), FIRST_TOUCH_SCHEMA
     )
-
-    import json
-
-    text = next((b.text for b in response.content if b.type == "text"), None)
-    if not text:
-        raise RuntimeError(f"draft_first_touch: no text content in response (stop_reason={response.stop_reason})")
-    return json.loads(text)

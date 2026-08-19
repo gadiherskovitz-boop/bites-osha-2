@@ -35,6 +35,7 @@ import json
 import os
 
 from pipeline.company_names import brand_name
+from pipeline.llm_utils import slug_cache_path
 
 MODEL = "claude-haiku-4-5"
 WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search"}
@@ -77,31 +78,39 @@ _SCHEMA = {
 }
 
 
-def _cache_path(name: str) -> str:
-    safe = "".join(c if c.isalnum() else "_" for c in name.lower())[:80]
-    return os.path.join(CACHE_DIR, f"{safe}.json")
-
-
-def is_restaurant_chain(company_name: str) -> bool:
+def classify_restaurant_chain(company_name: str) -> dict:
     """Permanently cached per name - a company's industry doesn't change
     day to day, same reasoning as classify_tier's cache.
 
-    Skipped (returns False) with no ANTHROPIC_API_KEY - see
-    pipeline/hiring_scanner.py's caller for why failing closed (not open)
-    is correct here: this function exists specifically to cut noise, so
-    "can't classify" must not silently mean "include everything."
+    Returns {"is_restaurant_chain": bool, "resolved_brand": str | None} -
+    resolved_brand is the schema's own field for the LLM's web-grounded
+    canonical brand name (already requested by _SYSTEM/_SCHEMA above, but
+    previously discarded by the caller). Exposing it lets
+    pipeline/hiring_scanner.py collapse a franchise-location-suffixed
+    Adzuna employer name (e.g. "Steak 'n Shake Edwardsville") down to its
+    real brand ("Steak 'n Shake") the same way company_names.py's
+    brand_name() collapses OSHA's franchisee-legal-name patterns -
+    brand_name() alone can't do this, since Adzuna's pattern (brand +
+    freeform location text, no case-number/DBA/store-number marker) isn't
+    one of the patterns it strips. Always {"is_restaurant_chain": False,
+    "resolved_brand": None} on any failure/skip path below.
+
+    Skipped with no ANTHROPIC_API_KEY - see pipeline/hiring_scanner.py's
+    caller for why failing closed (not open) is correct here: this
+    function exists specifically to cut noise, so "can't classify" must
+    not silently mean "include everything."
     """
     candidate = brand_name(company_name)
     if not candidate:
-        return False
+        return {"is_restaurant_chain": False, "resolved_brand": None}
 
-    cache_path = _cache_path(candidate)
+    cache_path = slug_cache_path(CACHE_DIR, candidate)
     if os.path.exists(cache_path):
         with open(cache_path) as f:
-            return json.load(f)["is_restaurant_chain"]
+            return json.load(f)
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        return False
+        return {"is_restaurant_chain": False, "resolved_brand": None}
 
     import anthropic
 
@@ -115,13 +124,18 @@ def is_restaurant_chain(company_name: str) -> bool:
         messages=[{"role": "user", "content": f'Is "{candidate}" a restaurant or QSR chain?'}],
     )
     if response.stop_reason == "refusal":
-        return False
+        return {"is_restaurant_chain": False, "resolved_brand": None}
     text = next((b.text for b in response.content if b.type == "text"), None)
     if not text:
-        return False
+        return {"is_restaurant_chain": False, "resolved_brand": None}
     parsed = json.loads(text)
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     with open(cache_path, "w") as f:
         json.dump(parsed, f)
-    return parsed["is_restaurant_chain"]
+    return parsed
+
+
+def is_restaurant_chain(company_name: str) -> bool:
+    """Boolean-only convenience wrapper around classify_restaurant_chain()."""
+    return classify_restaurant_chain(company_name)["is_restaurant_chain"]

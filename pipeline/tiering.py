@@ -32,14 +32,3 @@ def tier_for_lookup(site_count_lookup: dict) -> str | None:
     if hint:
         return None if hint == "Disqualified" else hint
     return "Tier 3"
-
-
-def governance_model(franchised_units: int, company_units: int) -> str:
-    """Classifies ownership structure from real franchised-vs-company unit counts."""
-    total = franchised_units + company_units
-    company_share = company_units / total
-    if company_share >= 0.85:
-        return "Corporate"
-    if company_share <= 0.15:
-        return "Franchise"
-    return "Mixed"

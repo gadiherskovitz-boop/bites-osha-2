@@ -12,12 +12,12 @@ agnostic Bites facts (FRONTLINE_TRAINING_FAILURE_MODES, PROOF_POINTS) are
 imported from pipeline.personalize rather than duplicated - reading those
 constants doesn't touch or risk that file.
 
-This is a first draft awaiting approval, not yet wired into
-pipeline/signal_handler.py:handle_hiring_signal - that still reports
-tier1_first_touch as not-yet-built until the rules below are signed off.
+Finalized and wired into pipeline/signal_handler.py:handle_hiring_signal via
+_maybe_draft_and_note_hiring_first_touch(), the same shape as OSHA's Task #8.
 """
 from __future__ import annotations
 
+from pipeline.llm_utils import FIRST_TOUCH_SCHEMA, call_json_schema
 from pipeline.personalize import PROOF_POINTS
 
 # Same model tradeoff as OSHA's Task #8: this runs once and its output IS
@@ -159,33 +159,6 @@ APPROVED PROOF POINTS: {PROOF_POINTS[0]}; {PROOF_POINTS[1]}
 
 def draft_first_touch(signal: dict, account_name: str, contact: dict) -> dict:
     """Calls Claude to draft the email. Returns {"subject": ..., "body": ...}."""
-    import anthropic
-
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        system=SYSTEM_PROMPT,
-        output_config={
-            "format": {
-                "type": "json_schema",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "subject": {"type": "string"},
-                        "body": {"type": "string"},
-                    },
-                    "required": ["subject", "body"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        messages=[{"role": "user", "content": build_user_prompt(signal, account_name, contact)}],
+    return call_json_schema(
+        MODEL, SYSTEM_PROMPT, build_user_prompt(signal, account_name, contact), FIRST_TOUCH_SCHEMA
     )
-
-    import json
-
-    text = next((b.text for b in response.content if b.type == "text"), None)
-    if not text:
-        raise RuntimeError(f"draft_first_touch: no text content in response (stop_reason={response.stop_reason})")
-    return json.loads(text)

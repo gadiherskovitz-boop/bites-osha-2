@@ -9,12 +9,14 @@ from pipeline.hubspot_client import (
     NOTE_TO_CONTACT,
     create_note,
     enroll_in_sequence,
+    subscribe_contact,
     upsert_qsr_signal,
     upsert_signal_company,
 )
 from pipeline.osha_client import violation_narrative
 from pipeline.company_names import brand_name
 from pipeline.personalize import draft_first_touch
+from pipeline.hiring_personalize import draft_first_touch as draft_hiring_first_touch
 from pipeline.site_count import lookup_site_count
 from pipeline.slack_client import CHANNELS, post_message
 from pipeline.tiering import tier_for_lookup
@@ -181,7 +183,7 @@ def _render_note(lines: list[tuple[str, str, str]]) -> str:
     return "<br>".join(rendered)
 
 
-def _maybe_enroll_in_sequence(tier: str | None, sequence_eligible: bool, contact_id: str | None) -> dict:
+def _maybe_enroll_in_sequence(tier: str | None, sequence_eligible: bool, contact: dict | None) -> dict:
     """Tier 3, non-Fat/Cat signals auto-enroll their resolved contact into the
     Tier 3 to-do sequence - the one behavior Task #7 adds. Tier 1's
     enrollment is separate (_maybe_draft_and_note_first_touch) since it
@@ -202,15 +204,24 @@ def _maybe_enroll_in_sequence(tier: str | None, sequence_eligible: bool, contact
     every real precondition here - a resolved contact, a configured
     sequence, a connected sender - is currently unmet and that must stay
     visible rather than fail quietly.
+
+    `contact` is {"id", "name", "title", "email"} once Task #4
+    (resolve_contact) lands. Subscribes the contact's legal basis before
+    enrolling when an email is present - this portal 400s enrollment with
+    SequenceError.UNSUBSCRIBED without a recorded legal basis (see
+    subscribe_contact's docstring), a real constraint hit and fixed once
+    already but only inside the manual Clay-import scripts, not here.
     """
     if tier != "Tier 3" or not sequence_eligible:
         return {"attempted": False, "reason": "not Tier 3 / not sequence-eligible"}
-    if not contact_id:
+    if not contact:
         return {"attempted": False, "reason": "no resolved contact yet (Task #4, blocked on Amplemarket)"}
     if not (TIER3_SEQUENCE_ID and SEQUENCE_SENDER_EMAIL and SEQUENCE_SENDER_USER_ID):
         return {"attempted": False, "reason": "Tier 3 sequence not configured (see docs/task7_workflow_notes.md)"}
 
-    enroll_in_sequence(contact_id, TIER3_SEQUENCE_ID, SEQUENCE_SENDER_EMAIL, SEQUENCE_SENDER_USER_ID)
+    if contact.get("email"):
+        subscribe_contact(contact["email"])
+    enroll_in_sequence(contact["id"], TIER3_SEQUENCE_ID, SEQUENCE_SENDER_EMAIL, SEQUENCE_SENDER_USER_ID)
     return {"attempted": True, "sequence_id": TIER3_SEQUENCE_ID}
 
 
@@ -234,9 +245,11 @@ def _maybe_draft_and_note_first_touch(
     discussion that led here - HubSpot sequences don't support per-contact
     custom step content, so a Note is where the draft actually lives).
 
-    `contact` is {"id", "name", "title"} once Task #4 (resolve_contact)
-    exists - None until then, in which case this is skipped and reported,
-    same honesty pattern as _maybe_enroll_in_sequence.
+    `contact` is {"id", "name", "title", "email"} once Task #4
+    (resolve_contact) exists - None until then, in which case this is
+    skipped and reported, same honesty pattern as _maybe_enroll_in_sequence.
+    Subscribes the contact's legal basis before enrolling when an email is
+    present, same reasoning as _maybe_enroll_in_sequence.
     """
     if tier != "Tier 1" or not sequence_eligible:
         return {"attempted": False, "reason": "not Tier 1 / not sequence-eligible"}
@@ -247,6 +260,8 @@ def _maybe_draft_and_note_first_touch(
 
     draft = draft_first_touch(signal, account_name, contact)
     create_note(contact["id"], _render_note_body(draft["subject"], draft["body"]), NOTE_TO_CONTACT)
+    if contact.get("email"):
+        subscribe_contact(contact["email"])
     enroll_in_sequence(contact["id"], TIER1_SEQUENCE_ID, SEQUENCE_SENDER_EMAIL, SEQUENCE_SENDER_USER_ID)
     return {"attempted": True, "sequence_id": TIER1_SEQUENCE_ID, "draft_subject": draft["subject"]}
 
@@ -259,9 +274,10 @@ def handle_signal(signal: dict, contact: dict | None = None) -> dict:
     sequence enrollment (Task #7) and the Tier 1 drafted-email + enrollment
     (Task #8).
 
-    `contact` is {"id", "name", "title"} once Task #4 (resolve_contact)
-    lands - None until then, in which case both Tier 3 enrollment and the
-    Tier 1 draft are skipped and reported honestly rather than faked.
+    `contact` is {"id", "name", "title", "email"} once Task #4
+    (resolve_contact) lands - None until then, in which case both Tier 3
+    enrollment and the Tier 1 draft are skipped and reported honestly
+    rather than faked.
     """
     lookup = lookup_site_count(signal["establishment_name"])
     tier = tier_for_lookup(lookup)
@@ -308,8 +324,7 @@ def handle_signal(signal: dict, contact: dict | None = None) -> dict:
 
     is_fat_cat = subtype == "Fat/Cat"
     sequence_eligible = not is_fat_cat
-    contact_id = contact["id"] if contact else None
-    enrollment = _maybe_enroll_in_sequence(tier, sequence_eligible, contact_id)
+    enrollment = _maybe_enroll_in_sequence(tier, sequence_eligible, contact)
     first_touch = _maybe_draft_and_note_first_touch(signal, account_name, tier, sequence_eligible, contact)
     return {
         "company_id": company_id,
@@ -336,20 +351,59 @@ def _build_hiring_lines(signal: dict, tier: str | None) -> list[tuple[str, str, 
     return lines
 
 
-def _maybe_enroll_hiring_tier3(tier: str | None, contact_id: str | None) -> dict:
+def _maybe_enroll_hiring_tier3(tier: str | None, contact: dict | None) -> dict:
     """Hiring's own Tier 3 gate - same shape as _maybe_enroll_in_sequence but
     against HIRING_TIER3_SEQUENCE_ID, since the OSHA Tier 3 sequence's copy
     doesn't fit a Hiring trigger. Hiring has no Fat/Cat-equivalent exclusion,
-    so tier is the only gate."""
+    so tier is the only gate.
+
+    Despite the name, HIRING_TIER3_SEQUENCE_ID is the one real, live
+    "QSR Hiring Signal" sequence used for BOTH tiers - see
+    _maybe_draft_and_note_hiring_first_touch, which enrolls Tier 1 into the
+    same sequence. That's the real decision already made and used by
+    scripts/populate_hiring_contacts_from_clay.py (one shared sequence,
+    unlike OSHA's two separate ones); the env var name is legacy and left
+    as-is rather than renamed for this fix.
+    """
     if tier != "Tier 3":
         return {"attempted": False, "reason": "not Tier 3"}
-    if not contact_id:
+    if not contact:
         return {"attempted": False, "reason": "no resolved contact yet (Task #4, blocked on Amplemarket)"}
     if not (HIRING_TIER3_SEQUENCE_ID and SEQUENCE_SENDER_EMAIL and SEQUENCE_SENDER_USER_ID):
         return {"attempted": False, "reason": "Hiring Tier 3 sequence not configured (see docs/hiring_signal_scope.md)"}
 
-    enroll_in_sequence(contact_id, HIRING_TIER3_SEQUENCE_ID, SEQUENCE_SENDER_EMAIL, SEQUENCE_SENDER_USER_ID)
+    if contact.get("email"):
+        subscribe_contact(contact["email"])
+    enroll_in_sequence(contact["id"], HIRING_TIER3_SEQUENCE_ID, SEQUENCE_SENDER_EMAIL, SEQUENCE_SENDER_USER_ID)
     return {"attempted": True, "sequence_id": HIRING_TIER3_SEQUENCE_ID}
+
+
+def _maybe_draft_and_note_hiring_first_touch(signal: dict, account_name: str, tier: str | None, contact: dict | None) -> dict:
+    """Hiring's counterpart to _maybe_draft_and_note_first_touch (Task #8) -
+    the copy rules (pipeline/hiring_personalize.py) were finalized but
+    previously only ever exercised through the standalone
+    scripts/populate_hiring_contacts_from_clay.py, never through this
+    routine handler; this wires them in the same shape OSHA already has.
+
+    Enrolls into HIRING_TIER3_SEQUENCE_ID, the same single "QSR Hiring
+    Signal" sequence _maybe_enroll_hiring_tier3 uses for Tier 3 - see that
+    function's docstring for why. The two gates are mutually exclusive
+    (tier is either "Tier 1" or "Tier 3", never both), so a contact is
+    never enrolled twice.
+    """
+    if tier != "Tier 1":
+        return {"attempted": False, "reason": "not Tier 1"}
+    if not contact:
+        return {"attempted": False, "reason": "no resolved contact yet (Task #4, blocked on Amplemarket)"}
+    if not (HIRING_TIER3_SEQUENCE_ID and SEQUENCE_SENDER_EMAIL and SEQUENCE_SENDER_USER_ID):
+        return {"attempted": False, "reason": "Hiring sequence not configured (see docs/hiring_signal_scope.md)"}
+
+    draft = draft_hiring_first_touch(signal, account_name, contact)
+    create_note(contact["id"], _render_note_body(draft["subject"], draft["body"]), NOTE_TO_CONTACT)
+    if contact.get("email"):
+        subscribe_contact(contact["email"])
+    enroll_in_sequence(contact["id"], HIRING_TIER3_SEQUENCE_ID, SEQUENCE_SENDER_EMAIL, SEQUENCE_SENDER_USER_ID)
+    return {"attempted": True, "sequence_id": HIRING_TIER3_SEQUENCE_ID, "draft_subject": draft["subject"]}
 
 
 def handle_hiring_signal(signal: dict, contact: dict | None = None) -> dict:
@@ -359,11 +413,10 @@ def handle_hiring_signal(signal: dict, contact: dict | None = None) -> dict:
     Note steps, not the OSHA-specific ones (brand collapsing, brand-wide
     history, violation narrative). See docs/hiring_signal_scope.md.
 
-    Tier 1 personalized first-touch (Task #8's Hiring equivalent) isn't
-    built this session - copy rules need their own design pass the way
-    docs/task8_email_rules.md got for OSHA, not a rushed reuse of OSHA's
-    citation-framed copy. Reported honestly as not-yet-built, same pattern
-    as the contact-resolution gaps above.
+    `contact` is {"id", "name", "title", "email"} once Task #4
+    (resolve_contact) lands - None until then, in which case both Tier 3
+    enrollment and the Tier 1 draft are skipped and reported honestly
+    rather than faked, same pattern as handle_signal().
     """
     # ATS board names come from pipeline/hiring_seed.py's hand-verified
     # list, already the canonical brand name - unlike OSHA's establishment
@@ -409,12 +462,12 @@ def handle_hiring_signal(signal: dict, contact: dict | None = None) -> dict:
     post_message(CHANNELS["hiring_signals"], _render_slack(lines))
     create_note(company_id, _render_note(lines))
 
-    contact_id = contact["id"] if contact else None
-    enrollment = _maybe_enroll_hiring_tier3(tier, contact_id)
+    enrollment = _maybe_enroll_hiring_tier3(tier, contact)
+    first_touch = _maybe_draft_and_note_hiring_first_touch(signal, account_name, tier, contact)
     return {
         "company_id": company_id,
         "tier": tier,
         "sequence_eligible": True,
         "sequence_enrollment": enrollment,
-        "tier1_first_touch": {"attempted": False, "reason": "Hiring Tier 1 copy rules not yet designed"},
+        "tier1_first_touch": first_touch,
     }

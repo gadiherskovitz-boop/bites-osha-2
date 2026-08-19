@@ -45,6 +45,7 @@ import os
 from datetime import date
 
 from pipeline.company_names import brand_name
+from pipeline.llm_utils import slug_cache_path
 
 # Haiku 4.5, chosen deliberately for cost on a coarse classification task
 # (~3x cheaper than Opus 5 here). Three things change with this choice and
@@ -145,11 +146,6 @@ def round_up_band(tier: str) -> str:
     return TIER_BANDS[min(index + 1, len(TIER_BANDS) - 1)]
 
 
-def _cache_path(brand: str) -> str:
-    safe = "".join(c if c.isalnum() else "_" for c in brand.lower())[:80]
-    return os.path.join(CACHE_DIR, f"{safe}.json")
-
-
 def _read_cache(path: str) -> dict | None:
     if not os.path.exists(path):
         return None
@@ -185,7 +181,7 @@ def classify_tier(establishment_name: str) -> dict | None:
     if not candidate:
         return None
 
-    cache_path = _cache_path(candidate)
+    cache_path = slug_cache_path(CACHE_DIR, candidate)
     cached = _read_cache(cache_path)
     if cached is not None:
         return cached or None  # empty dict is a cached "not found"

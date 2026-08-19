@@ -160,15 +160,25 @@ def upsert_signal_company(name: str, domain: str | None, properties: dict):
     twice - which is exactly what happened to a pre-existing "Wendy's"
     record in this portal.
 
-    Names still have to match exactly to converge. A residual gap remains
-    for brands whose OSHA establishment name never resolves to a canonical
-    brand (see pipeline/company_names.py) - closing that needs real domain
-    enrichment, the Clay/Amplemarket problem this project already hit.
+    Falls back to find_company_by_name_fuzzy() when the exact name also
+    misses - the same fuzzy matcher scripts/populate_hiring_contacts_from_clay.py's
+    resolve_company() already uses, generalized into this shared upsert so
+    both real handlers (handle_signal, handle_hiring_signal) get it too,
+    not just the one-off CSV script. Without this, two runs that produce
+    slightly different spellings of the same brand (a race between two
+    near-simultaneous signals, or a franchise-location-suffixed name like
+    "Steak 'n Shake Edwardsville" landing before a bare "Steak 'n Shake"
+    exists to exact-match against) create duplicate Company records -
+    confirmed live in this portal (Otg, DIG INN Support, Lettuce Entertain
+    You Restaurants all have exactly this duplicate pattern).
     """
     existing = find_company_by_domain(domain) if domain else None
     adopt_domain = False
     if existing is None:
         existing = find_company_by_name(name)
+        adopt_domain = existing is not None and bool(domain)
+    if existing is None:
+        existing = find_company_by_name_fuzzy(name)
         adopt_domain = existing is not None and bool(domain)
 
     if existing:
@@ -347,10 +357,13 @@ def get_company_qsr_signal(company_id: str, signal_type: str | None = None):
     CSV import, not a live signal-handler run) can recover the real
     signal that originally justified the account, instead of that data
     needing to be hardcoded per company at the call site. Returns the
-    first match if `signal_type` is given (e.g. "Hiring", to avoid
-    accidentally picking up an OSHA signal on a company that has both),
-    else the first associated signal regardless of type. None if the
-    company has no associated qsr_signal at all."""
+    MOST RECENT match by signal_date if `signal_type` is given (e.g.
+    "Hiring", to avoid accidentally picking up an OSHA signal on a company
+    that has both) - the association list itself isn't date-ordered, and a
+    company with several signals of the same type (several brands in this
+    portal have 2-3 real Hiring signals) needs the current one, not
+    whichever the API happened to list first. None if the company has no
+    associated qsr_signal at all."""
     resp = requests.get(
         f"{BASE_URL}/crm/v4/objects/companies/{company_id}/associations/{QSR_SIGNAL_OBJECT_TYPE}",
         headers=_headers(),
@@ -358,6 +371,7 @@ def get_company_qsr_signal(company_id: str, signal_type: str | None = None):
     resp.raise_for_status()
     signal_ids = [r["toObjectId"] for r in resp.json()["results"]]
 
+    matches = []
     for signal_id in signal_ids:
         detail = requests.get(
             f"{BASE_URL}/crm/v3/objects/{QSR_SIGNAL_OBJECT_TYPE}/{signal_id}",
@@ -368,8 +382,10 @@ def get_company_qsr_signal(company_id: str, signal_type: str | None = None):
         props = detail.json()["properties"]
         if signal_type and props.get("signal_type") != signal_type:
             continue
-        return props
-    return None
+        matches.append(props)
+    if not matches:
+        return None
+    return max(matches, key=lambda p: p.get("signal_date") or "")
 
 
 def list_sequences(user_id: str):
