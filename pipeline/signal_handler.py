@@ -19,10 +19,6 @@ from pipeline.site_count import lookup_site_count
 from pipeline.slack_client import CHANNELS, post_message
 from pipeline.tiering import tier_for_lookup
 
-# Real contact resolution needs Amplemarket (Task #4, not yet unblocked) -
-# this is shown honestly rather than faked. See HANDOFF.md.
-SUGGESTED_CONTACT_PLACEHOLDER = "Pending — contact resolution not yet wired up (Task #4, blocked on Amplemarket)"
-
 # Sequence enrollment (Task #7 for Tier 3, Task #8 for Tier 1) needs a
 # sequence created once by a human in the HubSpot UI (no public
 # create-sequence endpoint - see docs/task7_workflow_notes.md) plus a
@@ -166,7 +162,6 @@ def _build_lines(signal: dict, tier: str, lookup: dict, account_name: str) -> li
         lines.append(("📍", "Cited as", f"{signal['establishment_name']} ({signal['state']})"))
 
     lines.append(("🏷️", "Tier", tier))
-    lines.append(("👤", "Suggested Contact", SUGGESTED_CONTACT_PLACEHOLDER))
     lines.append(("🔗", "Source", signal["source_url"]))
     return lines
 
@@ -337,7 +332,6 @@ def _build_hiring_lines(signal: dict, tier: str | None) -> list[tuple[str, str, 
     if signal.get("location"):
         lines.append(("📍", "Location", signal["location"]))
     lines.append(("🏷️", "Tier", tier))
-    lines.append(("👤", "Suggested Contact", SUGGESTED_CONTACT_PLACEHOLDER))
     lines.append(("🔗", "Source", signal["source_url"]))
     return lines
 
