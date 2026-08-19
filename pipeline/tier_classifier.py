@@ -66,6 +66,13 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "output", "tier_cache"
 # Ascending, so an uncertain answer can be rounded up one band by index.
 TIER_BANDS = ["Disqualified", "Tier 3", "Tier 2", "Tier 1"]
 
+# Set for the remainder of this process's run once classify_tier() sees a
+# persistent (auth/billing/rate-limit) failure - see that function's
+# docstring. Module-level rather than a caller-side cache dict (the shape
+# hiring_scanner.py uses for its sibling classifier) since lookup_site_count()
+# has no per-run cache of its own to hold this in.
+_rung5_unavailable = False
+
 _SYSTEM = """You classify US restaurant chains into size bands for a sales \
 prospecting pipeline.
 
@@ -176,7 +183,26 @@ def classify_tier(establishment_name: str) -> dict | None:
     changes on the order of years, and the whole point of this rung is that
     it runs once per brand and never again. Delete output/tier_cache/ to
     re-run.
+
+    Fails open (returns None, falling through to the Tier 3 default) on a
+    real call failure instead of raising - a bare `json.loads` here crashed
+    a full-backlog scan outright on a real malformed response (2026-08-19,
+    ~270 unique establishment names in one run): one bad response took down
+    every remaining brand in the batch, the same "no error handling means
+    the whole flow stops" failure shape flagged in external review of a
+    similar prospecting pipeline. `output_config`'s json_schema constraint
+    makes this rare, not impossible - the API-level SDK client already
+    retries connection/429/5xx errors (`max_retries=2` by default), so what
+    reaches here is what survived that. Two shapes handled differently,
+    same distinction pipeline/hiring_scanner.py's `_is_restaurant_chain`
+    already makes for its sibling classifier: a persistent failure
+    (`anthropic.APIStatusError` - auth/billing/rate-limit exhausted even
+    after the SDK's own retries) sets a per-run flag so the rest of this
+    run's ~250 brands don't each pay the same latency to fail identically;
+    a one-off glitch (malformed JSON for one specific brand) only skips
+    that brand.
     """
+    global _rung5_unavailable
     candidate = brand_name(establishment_name)
     if not candidate:
         return None
@@ -186,23 +212,31 @@ def classify_tier(establishment_name: str) -> dict | None:
     if cached is not None:
         return cached or None  # empty dict is a cached "not found"
 
+    if _rung5_unavailable:
+        return None
+
     import anthropic
 
     client = anthropic.Anthropic()
     # No `effort` (errors on Haiku 4.5) and no `thinking` (Haiku 4.5 has no
     # adaptive thinking; omitting it means none, which suits this task).
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=4096,
-        system=_SYSTEM,
-        tools=[WEB_SEARCH_TOOL],
-        output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
-        messages=[{
-            "role": "user",
-            "content": f"How many US locations does the restaurant chain "
-                       f'"{candidate}" operate? Which band does it fall in?',
-        }],
-    )
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=4096,
+            system=_SYSTEM,
+            tools=[WEB_SEARCH_TOOL],
+            output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
+            messages=[{
+                "role": "user",
+                "content": f"How many US locations does the restaurant chain "
+                           f'"{candidate}" operate? Which band does it fall in?',
+            }],
+        )
+    except anthropic.APIStatusError as e:
+        print(f"  (Rung 5 classifier unavailable, skipping remaining lookups this run: {e})")
+        _rung5_unavailable = True
+        return None
 
     if response.stop_reason == "refusal":
         return None
@@ -210,7 +244,11 @@ def classify_tier(establishment_name: str) -> dict | None:
     text = next((b.text for b in response.content if b.type == "text"), None)
     if not text:
         return None
-    parsed = json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"  (Rung 5 classifier returned malformed JSON for {candidate!r}, skipping just this brand: {e})")
+        return None
 
     if not parsed["found"]:
         _write_cache(cache_path, {})  # cache the miss so we don't re-pay for it

@@ -15,7 +15,13 @@ def main():
     print(f"{len(signals)} Hiring signals found this run - handling the first {limit}\n")
 
     for signal in signals[:limit]:
-        result = handle_hiring_signal(signal)
+        # Same isolation as scripts/handle_signals.py - one signal's failure
+        # must not silently take the whole batch down with it.
+        try:
+            result = handle_hiring_signal(signal)
+        except Exception as e:
+            print(f"[Hiring] {signal['establishment_name']} - {signal['job_title']} -> FAILED: {e}")
+            continue
         print(
             f"[Hiring] {signal['establishment_name']} - {signal['job_title']} -> "
             f"company {result['company_id']}, {result['tier']}, "

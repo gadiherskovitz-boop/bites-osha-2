@@ -3,10 +3,33 @@ from __future__ import annotations
 import re
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 from pipeline.config import HUBSPOT_PRIVATE_APP_TOKEN
 
 BASE_URL = "https://api.hubapi.com"
+
+# Retries rate limits and transient server errors with backoff instead of
+# raising on the first hit - previously every call here had zero retry
+# logic, unlike Claude calls (pipeline/llm_utils.py's anthropic.Anthropic()
+# client retries these same error classes by default). The real risk this
+# guards against: a live demo or a real scheduled run pushing several
+# signals back-to-back can plausibly hit HubSpot's own rate limit, and
+# without this, that one 429 would raise via raise_for_status() and take
+# down whatever loop called in (see scripts/handle_signals.py's per-signal
+# try/except for the other half of this same fix). backoff_factor=1 means
+# 1s/2s/4s between the 3 retries; POST/PATCH/PUT are included in
+# allowed_methods since every write here is naturally idempotent
+# (upsert-by-lookup or a dedup check before create).
+_session = requests.Session()
+_retry = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST", "PATCH", "PUT"],
+)
+_session.mount("https://", HTTPAdapter(max_retries=_retry))
 
 # The bare schema name ("qsr_signal") 400s ("Unable to infer object type")
 # against the actual object read/write/search endpoints - confirmed live -
@@ -27,13 +50,13 @@ def _headers():
 
 def create_property_if_missing(object_type: str, property_def: dict):
     name = property_def["name"]
-    check = requests.get(
+    check = _session.get(
         f"{BASE_URL}/crm/v3/properties/{object_type}/{name}", headers=_headers()
     )
     if check.status_code == 200:
         return check.json()
 
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/properties/{object_type}",
         headers=_headers(),
         json=property_def,
@@ -43,7 +66,7 @@ def create_property_if_missing(object_type: str, property_def: dict):
 
 
 def find_company_by_domain(domain: str):
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/objects/companies/search",
         headers=_headers(),
         json={
@@ -65,7 +88,7 @@ def find_company_by_domain(domain: str):
 def upsert_company(domain: str, properties: dict):
     existing = find_company_by_domain(domain)
     if existing:
-        resp = requests.patch(
+        resp = _session.patch(
             f"{BASE_URL}/crm/v3/objects/companies/{existing['id']}",
             headers=_headers(),
             json={"properties": properties},
@@ -73,7 +96,7 @@ def upsert_company(domain: str, properties: dict):
         resp.raise_for_status()
         return resp.json()
 
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/objects/companies",
         headers=_headers(),
         json={"properties": {**properties, "domain": domain}},
@@ -83,7 +106,7 @@ def upsert_company(domain: str, properties: dict):
 
 
 def find_company_by_name(name: str):
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/objects/companies/search",
         headers=_headers(),
         json={
@@ -123,7 +146,7 @@ def find_company_by_name_fuzzy(name: str):
     if not first_token:
         return None
 
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/objects/companies/search",
         headers=_headers(),
         json={
@@ -183,7 +206,7 @@ def upsert_signal_company(name: str, domain: str | None, properties: dict):
 
     if existing:
         patch = {**properties, "domain": domain} if adopt_domain else properties
-        resp = requests.patch(
+        resp = _session.patch(
             f"{BASE_URL}/crm/v3/objects/companies/{existing['id']}",
             headers=_headers(),
             json={"properties": patch},
@@ -194,7 +217,7 @@ def upsert_signal_company(name: str, domain: str | None, properties: dict):
     create_properties = {**properties, "name": name}
     if domain:
         create_properties["domain"] = domain
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/objects/companies",
         headers=_headers(),
         json={"properties": create_properties},
@@ -204,7 +227,7 @@ def upsert_signal_company(name: str, domain: str | None, properties: dict):
 
 
 def find_contact_by_email(email: str):
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/objects/contacts/search",
         headers=_headers(),
         json={
@@ -220,7 +243,7 @@ def find_contact_by_email(email: str):
 
 
 def create_contact(properties: dict, company_id: str):
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/objects/contacts",
         headers=_headers(),
         json={"properties": properties},
@@ -232,7 +255,7 @@ def create_contact(properties: dict, company_id: str):
 
 
 def associate_contact_to_company(contact_id: str, company_id: str):
-    resp = requests.put(
+    resp = _session.put(
         f"{BASE_URL}/crm/v4/objects/contacts/{contact_id}/associations/companies/{company_id}",
         headers=_headers(),
         json=[
@@ -263,7 +286,7 @@ def subscribe_contact(email: str, subscription_id: str = ONE_TO_ONE_SUBSCRIPTION
     contact never opted in; the honest basis for cold B2B outreach to a
     business role via public professional information is legitimate
     interest, not consent."""
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/communication-preferences/v3/subscribe",
         headers=_headers(),
         json={
@@ -285,7 +308,7 @@ def find_schema(name: str):
     """GET /crm/v3/schemas/{name} 400s ('Unable to infer object type') for a
     name that was never registered, rather than 404ing - confirmed live -
     so existence is checked by listing all schemas instead."""
-    resp = requests.get(f"{BASE_URL}/crm/v3/schemas", headers=_headers())
+    resp = _session.get(f"{BASE_URL}/crm/v3/schemas", headers=_headers())
     resp.raise_for_status()
     return next((s for s in resp.json()["results"] if s["name"] == name), None)
 
@@ -294,7 +317,7 @@ def create_schema_if_missing(schema_def: dict):
     existing = find_schema(schema_def["name"])
     if existing:
         return existing
-    resp = requests.post(f"{BASE_URL}/crm/v3/schemas", headers=_headers(), json=schema_def)
+    resp = _session.post(f"{BASE_URL}/crm/v3/schemas", headers=_headers(), json=schema_def)
     resp.raise_for_status()
     return resp.json()
 
@@ -306,7 +329,7 @@ def find_qsr_signal(activity_nr: str, citation_id: str | None = None):
         if citation_id
         else {"propertyName": "source_citation_id", "operator": "NOT_HAS_PROPERTY"}
     )
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/objects/{QSR_SIGNAL_OBJECT_TYPE}/search",
         headers=_headers(),
         json={"filterGroups": [{"filters": filters}], "limit": 1},
@@ -325,7 +348,7 @@ def upsert_qsr_signal(company_id: str, properties: dict):
         properties["source_activity_nr"], properties.get("source_citation_id")
     )
     if existing:
-        resp = requests.patch(
+        resp = _session.patch(
             f"{BASE_URL}/crm/v3/objects/{QSR_SIGNAL_OBJECT_TYPE}/{existing['id']}",
             headers=_headers(),
             json={"properties": properties},
@@ -333,7 +356,7 @@ def upsert_qsr_signal(company_id: str, properties: dict):
         resp.raise_for_status()
         return resp.json()
 
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/objects/{QSR_SIGNAL_OBJECT_TYPE}",
         headers=_headers(),
         json={"properties": properties},
@@ -341,7 +364,7 @@ def upsert_qsr_signal(company_id: str, properties: dict):
     resp.raise_for_status()
     signal = resp.json()
 
-    assoc = requests.put(
+    assoc = _session.put(
         f"{BASE_URL}/crm/v4/objects/{QSR_SIGNAL_OBJECT_TYPE}/{signal['id']}/associations/default/companies/{company_id}",
         headers=_headers(),
     )
@@ -364,7 +387,7 @@ def get_company_qsr_signal(company_id: str, signal_type: str | None = None):
     portal have 2-3 real Hiring signals) needs the current one, not
     whichever the API happened to list first. None if the company has no
     associated qsr_signal at all."""
-    resp = requests.get(
+    resp = _session.get(
         f"{BASE_URL}/crm/v4/objects/companies/{company_id}/associations/{QSR_SIGNAL_OBJECT_TYPE}",
         headers=_headers(),
     )
@@ -373,7 +396,7 @@ def get_company_qsr_signal(company_id: str, signal_type: str | None = None):
 
     matches = []
     for signal_id in signal_ids:
-        detail = requests.get(
+        detail = _session.get(
             f"{BASE_URL}/crm/v3/objects/{QSR_SIGNAL_OBJECT_TYPE}/{signal_id}",
             headers=_headers(),
             params={"properties": "signal_summary,signal_date,signal_type"},
@@ -400,7 +423,7 @@ def list_sequences(user_id: str):
     optional - a call without it 400s. Needs automation.sequences.read.
     See docs/task7_workflow_notes.md.
     """
-    resp = requests.get(
+    resp = _session.get(
         f"{BASE_URL}/automation/sequences/2026-03",
         headers=_headers(),
         params={"userId": user_id, "limit": 100},
@@ -421,7 +444,7 @@ def enroll_in_sequence(contact_id: str, sequence_id: str, sender_email: str, use
     the sequence/inbox prerequisites are confirmed. See
     docs/task7_workflow_notes.md.
     """
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/automation/sequences/2026-03/enrollments",
         headers=_headers(),
         params={"userId": user_id},
@@ -447,7 +470,7 @@ def create_note(object_id: str, note_body: str, association_type_id: int = NOTE_
     all current call sites). Pass NOTE_TO_CONTACT for a Contact - added for
     Task #8's first-touch draft, which lives on the contact it's addressed
     to, not the company."""
-    resp = requests.post(
+    resp = _session.post(
         f"{BASE_URL}/crm/v3/objects/notes",
         headers=_headers(),
         json={

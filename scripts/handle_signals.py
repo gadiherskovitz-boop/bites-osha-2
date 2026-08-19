@@ -23,7 +23,18 @@ def main():
 
     for signal in signals[:limit]:
         label = signal.get("insp_subtype", signal["signal_type"])
-        result = handle_signal(signal)
+        # One signal's failure (a HubSpot/Slack/Claude error - rate limit,
+        # network blip, malformed response) must not silently take the
+        # whole batch down with it: without this, a single bad signal
+        # crashes the script and every signal after it in this run never
+        # gets processed, with nothing but a traceback to show for it -
+        # the real risk this is guarding against at a live demo or in a
+        # real scheduled run.
+        try:
+            result = handle_signal(signal)
+        except Exception as e:
+            print(f"[{label}] {signal['establishment_name']} -> FAILED: {e}")
+            continue
         print(
             f"[{label}] {signal['establishment_name']} -> company {result['company_id']}, "
             f"{result['tier']}, sequence_eligible={result['sequence_eligible']}, "
