@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import requests
 
 from pipeline.config import HUBSPOT_PRIVATE_APP_TOKEN
@@ -94,6 +96,54 @@ def find_company_by_name(name: str):
     resp.raise_for_status()
     results = resp.json()["results"]
     return results[0] if results else None
+
+
+def _normalize_company_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def find_company_by_name_fuzzy(name: str):
+    """Fallback for when find_company_by_name's exact match misses - a real
+    gap external enrichment data hits routinely, not a hypothetical: Clay
+    returned "Chick-fil-A Corporate Support Center" (its LinkedIn-sourced
+    display name) for the exact same company this pipeline already knows
+    as "Chick-fil-A". An exact match would silently create a duplicate.
+
+    Searches HubSpot's own companies via CONTAINS_TOKEN on `name`'s first
+    significant word (cheap way to get a short candidate list rather than
+    scanning the whole portal), then only accepts a candidate whose
+    normalized name is a true prefix of the other's - not just "shares a
+    token" (which would also match an unrelated company that happens to
+    share a common word). No AI, no hardcoded per-company synonym list -
+    same normalize-and-compare approach pipeline/site_count.py's Rung 1
+    already uses for OSHA establishment names, applied to a live HubSpot
+    search here instead of a static seed list.
+    """
+    first_token = re.split(r"[\s,.\-]+", name.strip())[0]
+    if not first_token:
+        return None
+
+    resp = requests.post(
+        f"{BASE_URL}/crm/v3/objects/companies/search",
+        headers=_headers(),
+        json={
+            "filterGroups": [
+                {"filters": [{"propertyName": "name", "operator": "CONTAINS_TOKEN", "value": first_token}]}
+            ],
+            "limit": 10,
+            "properties": ["name"],
+        },
+    )
+    resp.raise_for_status()
+    results = resp.json()["results"]
+
+    target = _normalize_company_name(name)
+    for candidate in results:
+        candidate_name = candidate["properties"].get("name") or ""
+        candidate_norm = _normalize_company_name(candidate_name)
+        if candidate_norm and (target.startswith(candidate_norm) or candidate_norm.startswith(target)):
+            return candidate
+    return None
 
 
 def upsert_signal_company(name: str, domain: str | None, properties: dict):
@@ -289,6 +339,39 @@ def upsert_qsr_signal(company_id: str, properties: dict):
     return signal
 
 
+def get_company_qsr_signal(company_id: str, signal_type: str | None = None):
+    """Fetches one real qsr_signal record associated with a company -
+    verified live 2026-08-18 (GET .../companies/{id}/associations/{type}
+    returns `{"results": [{"toObjectId": ...}]}`). Built so a later process
+    (e.g. drafting an email for a contact that arrived via a manual Clay
+    CSV import, not a live signal-handler run) can recover the real
+    signal that originally justified the account, instead of that data
+    needing to be hardcoded per company at the call site. Returns the
+    first match if `signal_type` is given (e.g. "Hiring", to avoid
+    accidentally picking up an OSHA signal on a company that has both),
+    else the first associated signal regardless of type. None if the
+    company has no associated qsr_signal at all."""
+    resp = requests.get(
+        f"{BASE_URL}/crm/v4/objects/companies/{company_id}/associations/{QSR_SIGNAL_OBJECT_TYPE}",
+        headers=_headers(),
+    )
+    resp.raise_for_status()
+    signal_ids = [r["toObjectId"] for r in resp.json()["results"]]
+
+    for signal_id in signal_ids:
+        detail = requests.get(
+            f"{BASE_URL}/crm/v3/objects/{QSR_SIGNAL_OBJECT_TYPE}/{signal_id}",
+            headers=_headers(),
+            params={"properties": "signal_summary,signal_date,signal_type"},
+        )
+        detail.raise_for_status()
+        props = detail.json()["properties"]
+        if signal_type and props.get("signal_type") != signal_type:
+            continue
+        return props
+    return None
+
+
 def list_sequences(user_id: str):
     """GET /automation/sequences/2026-03 (NOT .../sequences - that 400s,
     "sequences" gets parsed as a path-segment sequenceId; confirmed live
@@ -330,36 +413,6 @@ def enroll_in_sequence(contact_id: str, sequence_id: str, sender_email: str, use
             "contactId": contact_id,
             "sequenceId": sequence_id,
             "senderEmail": sender_email,
-        },
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-# "One to One" (Sales) subscription - found via GET /communication-
-# preferences/v3/definitions during Task #7's live testing. This EU-hosted
-# portal enforces GDPR consent on Sequence enrollment regardless of whether
-# the sequence has email steps - every contact defaults to no legal basis
-# for one-to-one communication until one is explicitly recorded here, or
-# enroll_in_sequence() 400s with SequenceError.UNSUBSCRIBED. Needs
-# communication_preferences.read_write. See docs/task7_workflow_notes.md.
-ONE_TO_ONE_SUBSCRIPTION_ID = "3303612298"
-
-
-def subscribe_contact(email: str, legal_basis_explanation: str = "Real signal-derived B2B sales outreach"):
-    """Records a legal basis for one-to-one (Sales) communication - real
-    write to a consent record, not a CRM property, hence its own endpoint
-    rather than a normal PATCH (confirmed live: writing hs_marketable_status
-    directly through the contacts PATCH endpoint silently no-ops). Call
-    once per contact before enroll_in_sequence(), or enrollment fails."""
-    resp = requests.post(
-        f"{BASE_URL}/communication-preferences/v3/subscribe",
-        headers=_headers(),
-        json={
-            "emailAddress": email,
-            "subscriptionId": ONE_TO_ONE_SUBSCRIPTION_ID,
-            "legalBasis": "CONSENT_WITH_NOTICE",
-            "legalBasisExplanation": legal_basis_explanation,
         },
     )
     resp.raise_for_status()
