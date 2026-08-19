@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from pipeline.adzuna_client import search_jobs as adzuna_search_jobs
 from pipeline.ats_client import greenhouse_jobs, lever_postings, workday_jobs
 from pipeline.company_names import brand_name
+from pipeline.hiring_industry_classifier import is_cached
 from pipeline.hiring_seed import ATS_BOARDS
 
 # Corrected 2026-08-18, per explicit user direction: the TRIGGER is any
@@ -251,7 +252,9 @@ def _resolved_brand_name(company_name: str, cache: dict[str, dict]) -> str:
     return resolved or brand_name(company_name)
 
 
-def scan_adzuna_hiring_signals(window_days: int = 100, today: date | None = None) -> list[dict]:
+def scan_adzuna_hiring_signals(
+    window_days: int = 100, today: date | None = None, max_new_classifications: int = 30
+) -> list[dict]:
     """Discovery scan via Adzuna - complements scan_hiring_signals() rather
     than replacing it (see docs/hiring_signal_scope.md): this is the only
     candidate found for a genuine industry-wide scan, since Adzuna doesn't
@@ -262,6 +265,22 @@ def scan_adzuna_hiring_signals(window_days: int = 100, today: date | None = None
     ADZUNA_PHRASES/ADZUNA_CATEGORIES comments above for the two real
     corrections that first live run produced, and _is_restaurant_chain for
     the industry-precision fix that same run showed was needed.
+
+    max_new_classifications caps how many NOT-YET-cached restaurant-chain
+    checks this run will pay for - each one is a real, paid Claude+web-search
+    call. Adzuna's search is broad by design (most raw results aren't
+    restaurants at all), so the number of new companies it surfaces isn't
+    something this pipeline controls, and cost/runtime would otherwise scale
+    with however many happen to show up in a given run. A real run hit this
+    live, 2026-08-19: ~95 new paid calls (~$2) in under 20 minutes, still
+    going, before being stopped by hand. Once a company IS classified the
+    result is cached forever (pipeline/hiring_industry_classifier.py) and
+    costs nothing on every later run - this only limits how much NEW
+    classification one run will pay for. Company names beyond the cap are
+    simply skipped this run (fail closed, same as an unclassifiable name),
+    not retried or deferred - a later run with the cap reset will pick them
+    up for the same reason a re-run naturally finds fewer new ones over time
+    as the cache fills in.
     """
     today = today or date.today()
     start = today - timedelta(days=window_days)
@@ -272,7 +291,8 @@ def scan_adzuna_hiring_signals(window_days: int = 100, today: date | None = None
             for job in adzuna_search_jobs(phrase, category=category):
                 raw_jobs[job["posting_id"]] = job  # dedupe - the same posting can match multiple phrase/category pairs
 
-    restaurant_chain_cache: dict[str, bool] = {}
+    restaurant_chain_cache: dict[str, dict] = {}
+    new_classifications = 0
     signals = []
     for job in raw_jobs.values():
         if job["posted_date"] and job["posted_date"] < start:
@@ -282,14 +302,19 @@ def scan_adzuna_hiring_signals(window_days: int = 100, today: date | None = None
         relevant, reason = is_relevant_hiring_posting(job["title"])
         if not relevant:
             continue
-        if not job["company_name"] or not _is_restaurant_chain(job["company_name"], restaurant_chain_cache):
+        company_name = job["company_name"]
+        if not company_name:
+            continue
+        if company_name not in restaurant_chain_cache and not is_cached(company_name):
+            if new_classifications >= max_new_classifications:
+                continue  # budget exhausted this run - skip rather than spend
+            new_classifications += 1
+        if not _is_restaurant_chain(company_name, restaurant_chain_cache):
             continue
         signals.append(
             {
                 "signal_type": "Hiring",
-                "establishment_name": _resolved_brand_name(job["company_name"], restaurant_chain_cache)
-                if job["company_name"]
-                else "Unknown",
+                "establishment_name": _resolved_brand_name(company_name, restaurant_chain_cache),
                 "domain": None,  # Adzuna doesn't carry a domain - company enrichment resolves this later
                 "job_title": job["title"],
                 "team": None,

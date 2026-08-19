@@ -49,7 +49,7 @@ def _parse_date(text: str | None) -> date | None:
 
 
 def search_jobs(
-    what_phrase: str, category: str | None = None, country: str = "us", results_per_page: int = 50, max_pages: int = 20
+    what_phrase: str, category: str | None = None, country: str = "us", results_per_page: int = 50, max_pages: int = 5
 ) -> list[dict]:
     """Exact-phrase job search, optionally scoped to an Adzuna category
     (e.g. `hospitality-catering-jobs`, `hr-jobs`). Not scoped to any known
@@ -61,6 +61,22 @@ def search_jobs(
     regardless of `count`, silently truncating any phrase/category
     combination with more real hits than that, the same failure shape the
     Workday `total`-only-on-page-1 bug (pipeline/ats_client.py) produced.
+
+    max_pages=5 (250 results/query) rather than a much higher bound: this
+    is a discovery search across ALL industries before any restaurant-chain
+    filtering happens, and every raw result that reaches
+    pipeline/hiring_scanner.py's relevance filter with a not-yet-seen
+    company name costs a real, paid classifier call downstream (see
+    scan_adzuna_hiring_signals' own max_new_classifications). A first
+    attempt at max_pages=20 was tried and reverted live, 2026-08-19: it
+    made the Hiring scan ~8x slower (98s -> 800s) and roughly 10x more
+    fresh classifier calls in one run than intended, because pagination
+    volume and paid-call volume are coupled here in a way they aren't for
+    the Workday fix this pattern was borrowed from (Workday's pages are
+    already scoped to one known company's board, not a broad keyword
+    search). 250 results/query is a real improvement over the old 100 cap
+    without reproducing that blowup - the actual cost ceiling lives in
+    max_new_classifications, not here.
 
     Returns [] immediately if ADZUNA_APP_ID/ADZUNA_APP_KEY aren't set.
     """

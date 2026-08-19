@@ -78,6 +78,15 @@ _SCHEMA = {
 }
 
 
+def is_cached(company_name: str) -> bool:
+    """True if classify_restaurant_chain(company_name) would hit the
+    permanent on-disk cache (free) rather than make a real paid call.
+    Lets a caller budget how many NEW calls a run is willing to pay for -
+    see pipeline/hiring_scanner.py:scan_adzuna_hiring_signals."""
+    candidate = brand_name(company_name)
+    return bool(candidate) and os.path.exists(slug_cache_path(CACHE_DIR, candidate))
+
+
 def classify_restaurant_chain(company_name: str) -> dict:
     """Permanently cached per name - a company's industry doesn't change
     day to day, same reasoning as classify_tier's cache.
